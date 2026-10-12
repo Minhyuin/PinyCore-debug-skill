@@ -137,7 +137,7 @@ machine actually has; a missing tool is reported, not invented.
 
 ## What has and has not been verified
 
-- Verified: the whole test suite (180 tests) runs against temporary directories
+- Verified: the whole test suite (182 tests) runs against temporary directories
   on both platforms. The skipped count is a machine fact, not a constant: a plain Windows
   account skips 2 (no symlink privilege, no X display), the CI Windows runner skips 1, and a
   Linux host swaps in its own set (no `%VAR%` install vocabulary, no registry, plus the dialog

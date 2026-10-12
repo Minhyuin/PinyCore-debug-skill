@@ -150,6 +150,20 @@ _FORWARDED = ('_text_width', '_stable_rect', '_client_size', '_enumerate_windows
               '_child_text', 'windows', 'child_windows', 'find_dialog', 'find_main_window',
               'find_message_box')
 
+#: Public entry points that are NOT single forwarding calls but still have to see a replacement
+#: made here. ``find_default_button`` is the case that proved it: it lives in each backend and
+#: calls that module's own ``child_windows``, so a test that pins ``piny_view.child_windows``
+#: changed nothing -- measured on the Ubuntu runner, where ``test_button_is_found_by_shape_in_the
+#: _bottom_band`` failed with ``AssertionError: unexpectedly None`` because the backend went
+#: looking at a real display instead of the fixture.
+#:
+#: The push is needed only when the backend calls a name that can be replaced HERE. ``button_layout``
+#: calls the backend's own ``_stable_rect`` and ``_text_width``, which ``_overlay`` already proxies,
+#: and pushing ``button_layout`` as well made the call ping-pong between the two modules -- so it is
+#: deliberately absent, and a test that replaces ``button_layout`` reaches the backend through the
+#: ``_call`` forwarding it already does.
+_PUSH_ON_REPLACE = _FORWARDED + ('find_default_button',)
+
 
 def _backend_call(name, *args, **kwargs):
     """Call ``name`` in the backend that is chosen right now, or ``None`` when there is none.
@@ -182,15 +196,35 @@ def _overlay(module):
     to the same name, so the call would recurse until the stack runs out). What is installed
     instead is a small proxy that decides at call time which of the two it is -- see
     ``_backend_call``. The ``_dispatch_forward`` marker is what distinguishes the two cases.
+
+    Names in ``_PUSH_ON_REPLACE`` that are not forwarding calls (``find_default_button``) exist in
+    the backend under the same name, and the copy installed there must call the BACKEND's original,
+    never this file's dispatcher -- otherwise the two modules call each other and the stack runs
+    out (``RecursionError`` in three ``test_view`` cases). The backend's original is looked up
+    before anything is installed, and the wrapper carries ``_dispatch_forward`` so the next call
+    does not push a second copy on top of it.
     """
-    for name in _FORWARDED:
+    for name in _PUSH_ON_REPLACE:
         function = globals().get(name)
         if function is None:
+            continue
+        if name not in _FORWARDED:
+            if not getattr(function, '_dispatch_forward', False):
+                setattr(module, name, _wrapper(getattr(module, name, function)))
             continue
         if getattr(function, '_dispatch_forward', False):
             setattr(module, name, _proxy(name))
         else:
             setattr(module, name, function)
+
+
+def _wrapper(function):
+    """A copy that will not be pushed down a second time (see ``_overlay``)."""
+    def call(*args, **kwargs):
+        return function(*args, **kwargs)
+    call.__name__ = getattr(function, '__name__', 'wrapped')
+    call._dispatch_forward = True
+    return call
 
 
 def _proxy(name):

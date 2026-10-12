@@ -198,6 +198,15 @@ class MessageBoxTests(unittest.TestCase):
     button on a shorter box. These tests pin the shape-based lookup and the report.
     """
 
+    def test_the_button_search_is_among_the_names_pushed_to_the_backend(self):
+        # `find_default_button` is the one public entry point that is NOT a single forwarding call
+        # and still has to see a replacement made here, because the backend's own copy calls that
+        # module's `child_windows`. Dropping it from this tuple breaks the search on any platform
+        # whose backend exists -- it failed only on Linux CI before, which is exactly the kind of
+        # breakage a local run cannot notice, so the wiring is asserted instead.
+        self.assertIn('find_default_button', v._PUSH_ON_REPLACE)
+        self.assertTrue(set(v._FORWARDED) <= set(v._PUSH_ON_REPLACE))
+
     def test_button_is_found_by_shape_in_the_bottom_band(self):
         window = {'hwnd': 1, 'rect': (696, 289, 1214, 786)}   # 518 x 497, measured
         children = [
@@ -215,6 +224,31 @@ class MessageBoxTests(unittest.TestCase):
         self.assertIsNotNone(button)
         self.assertEqual(button['rect'], [1108, 745, 1201, 773])
         self.assertEqual(button['point'], (1154, 759))
+
+    def test_a_replaced_child_lookup_is_what_the_button_search_uses(self):
+        # The regression for a Linux-only failure: the search for the default button lives in the
+        # backend and calls that module's own `child_windows`, so replacing it HERE used to change
+        # nothing and the backend went to a real display (on the Ubuntu runner: `AssertionError:
+        # unexpectedly None`). This pins the wiring without needing a display. The backend is put
+        # back afterwards because reaching it installs a wrapper in it.
+        backend = v.backend()
+        if backend is None:
+            self.skipTest('no dialog backend in this session')
+        window = {'hwnd': 1, 'rect': (696, 289, 1214, 786)}
+        children = [{'hwnd': 4, 'class': 'QWidget', 'text': '', 'rect': (1108, 745, 1201, 773)}]
+        seen = []
+        saved_local, saved_backend = v.child_windows, backend.child_windows
+        original = backend.find_default_button
+        v.child_windows = lambda hwnd: (seen.append(hwnd), children)[1]
+        try:
+            button = v.find_default_button(window)
+        finally:
+            v.child_windows = saved_local
+            backend.child_windows = saved_backend
+            backend.find_default_button = original
+        self.assertEqual(seen, [1], 'the replaced lookup was never called')
+        self.assertIsNotNone(button)
+        self.assertEqual(button['rect'], [1108, 745, 1201, 773])
 
     def test_no_button_child_reports_none_rather_than_guessing(self):
         window = {'hwnd': 1, 'rect': (100, 100, 400, 300)}
