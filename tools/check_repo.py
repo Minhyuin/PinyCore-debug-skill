@@ -68,6 +68,13 @@ MUST_NOT_BE_TRACKED = ('profiles/pinycore.json',)
 # Documents whose stated test baseline must agree, and the two spellings they use for it.
 TEST_COUNT_FILES = ('SKILL.md', 'STATUS.md', 'README.md', 'references/pinycore.md')
 TEST_COUNT_PATTERNS = (re.compile(r'(\d+)\s+tests\b'), re.compile(r'(\d+)\s*个(?:用例|测试)'))
+# A count spelled with one of those patterns only counts as a BASELINE if it is in the same
+# ballpark as the number the suite actually ran. Without this, a sentence that describes part of
+# the suite -- "test_linux.py's 26 cases" -- reads as a second, disagreeing baseline and fails the
+# check on correct prose. A stale baseline is always near the real one, so the tolerance is wide
+# on purpose: it is there to tell "a count of the whole suite" from "a count of something else",
+# not to police a digit.
+TEST_COUNT_TOLERANCE = 0.25
 
 
 def load_module(name, path):
@@ -290,6 +297,8 @@ def check_test_baseline(checks, expected):
         text = path.read_text(encoding='utf-8')
         found = {match.group(1) for pattern in TEST_COUNT_PATTERNS
                  for match in pattern.finditer(text)}
+        found = {number for number in found
+                 if abs(int(number) - expected) <= expected * TEST_COUNT_TOLERANCE}
         if not found:
             checks.fail('test baseline',
                         f'{document} states no test count; add "-> {expected} tests" so the '

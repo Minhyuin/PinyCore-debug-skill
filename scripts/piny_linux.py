@@ -230,18 +230,35 @@ def search_install_directories(key, bases=None):
                 for entry in entries:
                     if _matches_prefix(entry.name, prefix) and _executable(entry):
                         hits.append((entry, label + ' (' + where + ')'))
-    return hits
+    # Deduplicated here, not only by the caller: /usr/bin/openocd -> /opt/openocd/bin/openocd is
+    # the normal packaging, and both spellings are reached by the walk itself when both bases are
+    # (or point at) real directories. `find_tool` deduplicates again because it also merges the
+    # PATH hit; one extra pass over a handful of paths is not worth a second code path.
+    return _deduplicate(hits)
 
 
 def _deduplicate(found):
-    seen = set()
+    """Drop a hit whose FILE is already in the list, whatever spelling reached it.
+
+    Identity, not spelling: ``/usr/bin/openocd -> /opt/openocd/bin/openocd`` is the normal
+    packaging, and reporting one binary once per path that reaches it makes the alternatives
+    list meaningless. ``os.path.samefile`` is what answers that question, because a text key
+    is not enough -- measured on a GitHub Windows runner, two spellings of the same file
+    (an 8.3 short-name directory versus the symlink pointing into it) produced two different
+    strings from ``os.path.realpath``, so a realpath-derived key reported the same binary
+    twice and failed ``test_a_symlinked_install_is_not_reported_twice`` on Windows only.
+    """
     unique = []
     for path, label in found:
-        key = os.path.realpath(str(path))
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append((path, label))
+        for known, _ in unique:
+            try:
+                if os.path.samefile(str(path), str(known)):
+                    break
+            except OSError:
+                if os.path.normcase(os.path.realpath(str(path))) == os.path.normcase(os.path.realpath(str(known))):
+                    break
+        else:
+            unique.append((path, label))
     return unique
 
 

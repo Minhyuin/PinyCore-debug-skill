@@ -10,6 +10,7 @@ test, and the Linux half of a real rig is still unverified (see references/porta
 """
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -141,7 +142,10 @@ class InstallDirectoryTests(unittest.TestCase):
 
     def test_a_symlinked_install_is_not_reported_twice(self):
         # /usr/bin/openocd -> /opt/openocd/bin/openocd is the normal packaging. Reporting the
-        # same file once per spelling makes the "alternatives" list meaningless.
+        # same file once per spelling makes the "alternatives" list meaningless. This runs on
+        # the Windows CI runner (symlink privilege) and is skipped on an account without it,
+        # which is why the identity check cannot be a realpath string: on that runner the
+        # short-name and the symlink spellings resolve to different strings.
         with tempfile.TemporaryDirectory() as t:
             real = touch(Path(t) / 'real' / 'openocd')
             link = Path(t) / 'link'
@@ -151,6 +155,19 @@ class InstallDirectoryTests(unittest.TestCase):
             except (OSError, NotImplementedError):    # pragma: no cover - needs privilege
                 self.skipTest('symlinks are not available to this account')
             hits = pl.search_install_directories('openocd', bases=[Path(t) / 'real', link])
+        self.assertEqual(len(hits), 1, hits)
+
+    def test_an_aliased_file_is_recognised_by_identity_not_by_spelling(self):
+        # The regression for the Windows-runner failure above, in a form that needs no symlink
+        # privilege: a second name for one file whose realpath string DIFFERS. A spelling-based
+        # key reports it twice; os.path.samefile reports it once.
+        with tempfile.TemporaryDirectory() as t:
+            one = touch(Path(t) / 'one' / 'openocd')
+            alias = Path(t) / 'two'
+            alias.mkdir()
+            os.link(str(one), str(alias / 'openocd'))
+            self.assertNotEqual(os.path.realpath(one), os.path.realpath(alias / 'openocd'))
+            hits = pl.search_install_directories('openocd', bases=[Path(t) / 'one', alias])
         self.assertEqual(len(hits), 1, hits)
 
     def test_an_unknown_tool_key_returns_nothing_instead_of_raising(self):
