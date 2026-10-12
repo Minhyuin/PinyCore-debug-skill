@@ -209,5 +209,56 @@ class TitleMatchingTests(unittest.TestCase):
             self.assertEqual(x.find_main_window()['hwnd'], 2)
 
 
+class XErrorHandlerTests(unittest.TestCase):
+    """libX11 exits the process on an unhandled protocol error, so the handler is a safety
+    property of this module rather than a detail: a window that disappears between the
+    enumeration and the query must produce an empty answer, not a dead capture.
+
+    The marker is reset between tests rather than patched, and the difference is not cosmetic:
+    patching the LIST hands the module a second list while an already-installed handler keeps
+    writing into the first one, so the assertion would read a list nothing ever updates.
+    """
+
+    def setUp(self):
+        self._saved = (x._LAST_X_ERROR[0], x._X_ERROR_CALLBACK)
+
+    def tearDown(self):
+        x._LAST_X_ERROR[0], x._X_ERROR_CALLBACK = self._saved
+
+    def test_the_error_handler_returns_instead_of_exiting(self):
+        event = mock.Mock()
+        event.contents.error_code = 3
+        event.contents.resourceid = 0x1
+        x._LAST_X_ERROR[0] = None
+        self.assertEqual(x._on_x_error(None, event), 0)
+        self.assertEqual(x._LAST_X_ERROR[0], (3, 0x1))
+
+    def test_a_handler_that_cannot_read_the_event_still_returns(self):
+        # The struct is filled by the library; a handler that raised here would replace the
+        # process exit it exists to prevent with a different one.
+        self.assertEqual(x._on_x_error(None, None), 0)
+        self.assertEqual(x._on_x_error(None, mock.Mock(contents=None)), 0)
+
+    def test_the_install_is_attempted_once_and_keeps_its_callback_alive(self):
+        # XSetErrorHandler returns the PREVIOUS handler as a function pointer, so the stub hands
+        # back an address rather than a Mock: ctypes has to be able to cast whatever comes back.
+        lib = mock.Mock()
+        lib.XSetErrorHandler.return_value = 0
+        x._LAST_X_ERROR[0], x._X_ERROR_CALLBACK = None, None
+        x._quiet_xlib(lib)
+        first = x._X_ERROR_CALLBACK
+        x._quiet_xlib(lib)                           # a second load must not re-install
+        self.assertIsNotNone(first, 'a callback ctypes does not own must stay referenced')
+        lib.XSetErrorHandler.assert_called_once()
+        self.assertEqual(x._LAST_X_ERROR[0], 'installed')
+
+    def test_an_old_libx11_without_the_symbol_is_not_an_error(self):
+        lib = mock.Mock()
+        del lib.XSetErrorHandler                       # the symbol is absent
+        x._LAST_X_ERROR[0], x._X_ERROR_CALLBACK = None, None
+        x._quiet_xlib(lib)                             # must not raise
+        self.assertNotEqual(x._LAST_X_ERROR[0], 'installed')
+
+
 if __name__ == '__main__':
     unittest.main()

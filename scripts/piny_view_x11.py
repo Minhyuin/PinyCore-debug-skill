@@ -68,6 +68,21 @@ _KEY_PRESS, _KEY_RELEASE = 2, 3
 _MAX_DEPTH = 12
 
 
+#: ``XErrorEvent``, the struct libX11 hands to an error handler. The handler is installed as a
+#: callback, so this has to be laid out completely for the same reason as the struct below: the
+#: library writes all of it.
+class XErrorEvent(ctypes.Structure):
+    _fields_ = [('type', ctypes.c_int), ('display', ctypes.c_void_p),
+                ('resourceid', ctypes.c_ulong), ('serial', ctypes.c_ulong),
+                ('error_code', ctypes.c_ubyte), ('request_code', ctypes.c_ubyte),
+                ('minor_code', ctypes.c_ubyte)]
+
+
+#: The C signature of an Xlib error handler: int (*)(Display *, XErrorEvent *).
+_X_ERROR_HANDLER = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p,
+                                    ctypes.POINTER(XErrorEvent))
+
+
 class XWindowAttributes(ctypes.Structure):
     """The layout of ``XWindowAttributes``. Only the fields read here are named.
 
@@ -133,9 +148,11 @@ def _libraries():
     """``(libX11, libXtst)``, either of which may be None. Both are needed for a real click."""
     global _XLIB, _XTST_LIB, _LIBRARIES_FAILED
     if _XLIB is None and not _LIBRARIES_FAILED:
+        _LAST_X_ERROR[0] = None
         _XLIB = _load((ctypes.util.find_library('X11') or _X11, 'libX11.so', 'libX11.dylib'))
         if _XLIB is not None:
             _declare(_XLIB)
+            _quiet_xlib(_XLIB)
         _XTST_LIB = _load((ctypes.util.find_library('Xtst') or _XTST, 'libXtst.so'))
         if _XTST_LIB is not None:
             _XTST_LIB.XTestFakeMotionEvent.restype = ctypes.c_int
@@ -195,6 +212,52 @@ def _declare(lib):
     lib.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
     lib.XStringToKeysym.restype = ctypes.c_ulong
     lib.XStringToKeysym.argtypes = [ctypes.c_char_p]
+    lib.XSetErrorHandler.restype = ctypes.c_void_p
+    lib.XSetErrorHandler.argtypes = [ctypes.c_void_p]
+
+
+#: Set by the handler below instead of the default one, which calls exit().
+_LAST_X_ERROR = [None]
+#: The installed callback. Kept referenced here because ctypes does not own it: a local would be
+#: collected as soon as the install function returned, and libX11 would then call freed memory.
+_X_ERROR_CALLBACK = None
+
+
+def _on_x_error(display, event):
+    """Record an X protocol error and return, instead of letting Xlib exit the process.
+
+    libX11 aborts on an unhandled error, and it is not an exception that can be caught: the
+    default handler calls exit(). That matters here because every lookup in this module races the
+    application it is looking at -- a dialog that closes between the enumeration and the query
+    turns a perfectly ordinary race into a dead capture, with no report and nothing to read. The
+    failure it replaces is cheap: ``XGetWindowAttributes`` returns 0, and the caller treats that
+    as "no such window", which is exactly what happened.
+
+    This was not theoretical. An X11 job clicked a window handle that had never existed and the
+    whole run died with "X Error of failed request: BadWindow ... X_GetWindowAttributes" and no
+    way to see which test was running.
+    """
+    try:
+        code = event.contents.error_code if event else None
+        resource = event.contents.resourceid if event else None
+    except (AttributeError, ValueError):
+        code, resource = None, None
+    _LAST_X_ERROR[0] = (code, resource)
+    return 0
+
+
+def _quiet_xlib(lib):
+    """Install the non-fatal error handler once per loaded libX11."""
+    global _X_ERROR_CALLBACK
+    if _LAST_X_ERROR[0] == 'installed' or lib is None:
+        return
+    try:
+        _X_ERROR_CALLBACK = _X_ERROR_HANDLER(
+            lambda display, event: _on_x_error(display, event))
+        lib.XSetErrorHandler(ctypes.cast(_X_ERROR_CALLBACK, ctypes.c_void_p))
+    except (AttributeError, TypeError, ValueError):
+        return                                   # an old libX11 without the symbol: no change
+    _LAST_X_ERROR[0] = 'installed'
 
 
 def _display():

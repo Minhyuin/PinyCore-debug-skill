@@ -33,6 +33,9 @@ class FindToolTests(unittest.TestCase):
             self.assertEqual(report['source'], 'profile')
             self.assertEqual(report['found'], [], 'a working profile must not be second-guessed')
 
+    @unittest.skipUnless(pt.inventory() is None,
+                         'the built-in walk below is the Windows one; a POSIX host delegates to '
+                         'piny_linux, whose own half is covered in tests/test_linux.py')
     def test_an_absent_profile_value_falls_back_to_path(self):
         with tempfile.TemporaryDirectory() as t:
             found = touch(Path(t) / 'arm-none-eabi-gdb.exe')
@@ -42,6 +45,9 @@ class FindToolTests(unittest.TestCase):
             self.assertEqual(report['path'], found)
             self.assertEqual(report['source'], 'PATH: arm-none-eabi-gdb')
 
+    @unittest.skipUnless(pt.inventory() is None,
+                         'the built-in walk below is the Windows one; see tests/test_linux.py for '
+                         'the Linux half of the same contract')
     def test_install_directories_are_searched_from_a_fixture(self):
         # No environment variable and no `%` expansion here on purpose: that expansion is a
         # Windows spelling, so a test that needs it cannot be run on the other platform in CI.
@@ -56,9 +62,9 @@ class FindToolTests(unittest.TestCase):
             self.assertEqual(report['path'], wanted)
             self.assertEqual(report['source'], 'SEGGER/JLink (version-less)')
 
-    @unittest.skipUnless(sys.platform == 'win32',
-                         'INSTALL_BASES is a list of Windows spellings; on POSIX os.path.expandvars '
-                         'leaves %NAME% untouched, so there is no machine here to search')
+    @unittest.skipUnless(pt.inventory() is None,
+                         'INSTALL_BASES is a list of Windows spellings and os.path.expandvars '
+                         'leaves %NAME% untouched on POSIX, so this walk is Windows-only')
     def test_install_directories_are_globbed_and_expanded(self):
         with tempfile.TemporaryDirectory() as t:
             wanted = touch(Path(t) / 'SEGGER' / 'JLink_V878' / 'JLinkGDBServerCL.exe')
@@ -76,6 +82,9 @@ class FindToolTests(unittest.TestCase):
                 self.assertEqual(pt.search_install_directories('systemview',
                                                                bases=[r'%PINY_TEST_ABSENT%']), [])
 
+    @unittest.skipUnless(pt.inventory() is None,
+                         'the built-in walk below is the Windows one; see tests/test_linux.py for '
+                         'the Linux half of the same contract')
     def test_the_version_less_install_name_is_preferred_to_a_stamped_one(self):
         with tempfile.TemporaryDirectory() as t:
             plain = touch(Path(t) / 'SEGGER' / 'SystemView' / 'SystemView.exe')
@@ -84,6 +93,9 @@ class FindToolTests(unittest.TestCase):
                 report = pt.find_tool('systemview', None, bases=[t], with_registry=False)
             self.assertEqual(report['path'], plain)
 
+    @unittest.skipUnless(pt.inventory() is None,
+                         'the registry is a Windows lookup; on a POSIX host it must not even be '
+                         'listed as searched, which tests/test_linux.py asserts instead')
     def test_registry_answers_are_used_and_labelled(self):
         with tempfile.TemporaryDirectory() as t:
             wanted = touch(Path(t) / 'JLinkGDBServerCL.exe')
@@ -130,19 +142,26 @@ class DiscoverTests(unittest.TestCase):
         self.assertEqual(report['resolved']['openocd'], server)
 
     def test_companions_are_reported_beside_the_server(self):
-        with tempfile.TemporaryDirectory() as t:
-            jlink = touch(Path(t) / 'JLink.exe')
-            companions = pt.jlink_companions(touch(Path(t) / 'JLinkGDBServerCL.exe'))
-            linux = pt.companion_names('posix')
-        self.assertTrue(companions['JLink.exe']['exists'])
-        self.assertFalse(companions['JLinkRTTLogger.exe']['exists'])
-        self.assertEqual(companions['JLink.exe']['path'], jlink)
-        # Which CLIs sit beside the server is a platform fact, not a constant: Linux spells the
-        # same two tools JLinkExe and JLinkRTTLoggerExe, and a Windows list would report both
-        # of them as missing on a machine that has them.
+        # Which names live beside the server is a platform fact, not a constant: Linux spells the
+        # same two tools JLinkExe and JLinkRTTLoggerExe, and a Windows list would report both of
+        # them as missing on a machine that has them. So the pack is built from THIS platform's
+        # vocabulary -- the check that the packs differ is what keeps the assertion from being a
+        # tautology, and it fails if companion_names() ever ignores its platform argument.
+        names = pt.companion_names()
+        windows = pt.companion_names('nt')
+        linux = pt.companion_names('posix')
+        self.assertIn('JLink.exe', windows)
+        self.assertIn('JLinkRTTLogger.exe', windows)
+        self.assertEqual(names, windows if pt.inventory() is None else linux)
         self.assertIn('JLinkExe', linux)
         self.assertIn('JLinkRTTLoggerExe', linux)
         self.assertNotIn('JLink.exe', linux)
+        with tempfile.TemporaryDirectory() as t:
+            jlink = touch(Path(t) / names[0])
+            companions = pt.jlink_companions(touch(Path(t) / 'JLinkGDBServerCL.exe'))
+        self.assertTrue(companions[names[0]]['exists'])
+        self.assertFalse(companions[names[1]]['exists'])
+        self.assertEqual(companions[names[0]]['path'], jlink)
 
     def test_an_already_correct_profile_yields_no_overrides_at_all(self):
         with tempfile.TemporaryDirectory() as t:
@@ -168,6 +187,9 @@ class DiscoverTests(unittest.TestCase):
         self.assertEqual(overrides, {},
                          'the profile already names this file; it must not be echoed back')
 
+    @unittest.skipUnless(pt.inventory() is None,
+                         'discovery through the built-in walk is the Windows path; a POSIX host '
+                         'delegates the whole lookup to piny_linux')
     def test_overrides_carry_a_discovered_replacement_for_a_stale_path(self):
         with tempfile.TemporaryDirectory() as t:
             found = touch(Path(t) / 'arm-none-eabi-gdb.exe')

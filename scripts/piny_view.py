@@ -151,19 +151,54 @@ _FORWARDED = ('_text_width', '_stable_rect', '_client_size', '_enumerate_windows
               'find_message_box')
 
 
-def _overlay(module):
-    """Push a REPLACED forwarding entry into ``module``, so the backend really uses it.
+def _backend_call(name, *args, **kwargs):
+    """Call ``name`` in the backend that is chosen right now, or ``None`` when there is none.
 
-    An entry still holding its original forwarding function must NOT be pushed down: it forwards
-    to the same name in the backend, so putting it there would make the call recurse until the
-    stack runs out. The marker attribute on each forwarding function is what distinguishes the
-    two cases, and it is the whole reason this is not a plain ``setattr`` loop.
+    A forwarding function and a replaced one both have to work, and the difference only shows up
+    when someone patches a name here (a test, or a caller pinning a metric):
+
+      * not replaced -- the forwarding function would call itself, so the backend's own function
+        is reached by looking it up in the module here, at call time;
+      * replaced -- the replacement is what runs.
+
+    Looking it up at call time rather than copying it into the backend module is what keeps the
+    patch scoped to the caller. A copy lives on: the next call from anywhere would still use the
+    previous caller's stand-in, which on a real X display means poking a window handle that only
+    ever existed in a test.
+    """
+    module = backend()
+    if module is None:
+        return None
+    function = globals().get(name)
+    if getattr(function, '_dispatch_forward', False):
+        return getattr(module, name)(*args, **kwargs)
+    return function(*args, **kwargs)               # a replacement: calling it IS the point
+
+
+def _overlay(module):
+    """Point ``module``'s forwarded names at this file, so a patch here reaches the backend.
+
+    An entry still holding its original forwarding function must NOT be copied down (it forwards
+    to the same name, so the call would recurse until the stack runs out). What is installed
+    instead is a small proxy that decides at call time which of the two it is -- see
+    ``_backend_call``. The ``_dispatch_forward`` marker is what distinguishes the two cases.
     """
     for name in _FORWARDED:
-        replacement = globals().get(name)
-        if replacement is None or getattr(replacement, '_dispatch_forward', False):
+        function = globals().get(name)
+        if function is None:
             continue
-        setattr(module, name, replacement)
+        if getattr(function, '_dispatch_forward', False):
+            setattr(module, name, _proxy(name))
+        else:
+            setattr(module, name, function)
+
+
+def _proxy(name):
+    def call(*args, **kwargs):
+        return _backend_call(name, *args, **kwargs)
+    call.__name__ = name
+    call._dispatch_forward = True                  # never proxied twice
+    return call
 
 
 def _text_width(text, extent=BUTTON_FONT_PX):

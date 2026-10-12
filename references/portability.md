@@ -137,7 +137,8 @@ machine actually has; a missing tool is reported, not invented.
 
 ## What has and has not been verified
 
-- Verified: the whole test suite (175 tests, `OK (skipped=2)`) runs against temporary directories
+- Verified: the whole test suite (179 tests, `OK (skipped=2)` on Windows, `OK (skipped=5)` on Linux)
+  runs against temporary directories
   and patched probes, so it exercises the discovery logic without depending on this machine.
   `test_tools.py` covers the Windows half, `test_linux.py` the Linux half (install bases, `%VAR%`
   expansion, SEGGER's Linux executable spellings, version-less-directory preference, platform

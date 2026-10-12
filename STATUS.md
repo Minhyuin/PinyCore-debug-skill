@@ -151,7 +151,7 @@ python -X utf8 scripts\piny_trace.py record --output artifacts\board-run8 --seco
 | `profiles/pinycore.example.json` | 新机器用的模板：占位路径 + 每个键的用途注释，`doctor --portable` 会指出要改哪几个 |
 | `references/pinycore.md` | PinyCore 项目工具链与验证事实 |
 | `references/portability.md` | 迁移到另一台机器的完整说明：发现顺序、机器键 vs 目标键、速率是测量值不是偏好、serial 不猜、错误信息、严格模式、Windows/Linux 各自的差异点、已验证/未验证边界 |
-| `tests/` | `test_debug.py`、`test_trace.py`、`test_view.py`、`test_view_x11.py`、`test_tools.py`、`test_linux.py`；基线 `python -X utf8 -m unittest discover -s tests -t tests` → **175 tests, OK (skipped=2)**（两个平台数字一致，见未完成项 12） |
+| `tests/` | `test_debug.py`、`test_trace.py`、`test_view.py`、`test_view_x11.py`、`test_tools.py`、`test_linux.py`；基线 `python -X utf8 -m unittest discover -s tests -t tests` → **179 tests, OK (skipped=2)**（Windows；Linux 上同 179 个用例、跳过 5 个，见未完成项 12） |
 | `artifacts/portability-doctor/`、`portability-foreign/`、`portability-write/` | 迁移验证证据：本机全绿；伪造的"从别的机器拷来的" profile（`D:/code/PinyCore`、不存在的 gdb/J-Link 路径）被从 PATH 与 `HKLM\SOFTWARE\SEGGER\J-Link` 找回并写出 4 个修正键，同时点出 `project` 目录不存在 |
 | `artifacts/identify-jlink/`、`artifacts/snapshot-jlink/` | J-Link 连通性与寄存器快照证据 |
 | `artifacts/flash-jlink3`、`flash-jlink4`、`flash-jlink5` | J-Link 烧录证据；`flash-jlink5` 写入前后逐段 `matched` + `liveness advanced 1512`（`rate_hz 1008.0`） |
@@ -179,7 +179,7 @@ python -X utf8 scripts\piny_trace.py record --output artifacts\board-run8 --seco
 ## 下一步建议
 
 1. **提交并推送本次 Linux 适配**（用户 m04293 的要求）：提交到 `main` 并推送，然后看 CI 新增的 `x11` 任务是否像本机一样全绿。本机直连 GitHub 443 不通，推送要用一次性 `git -c http.proxy=http://127.0.0.1:7890 push origin main`（不要把代理写进用户的 git config）。
-2. **再同步一次已安装副本**（未完成项 5）：仓库化之后又改了 Linux 适配，`E:\Ele\Project\rm\PinyCore\.dsh\skills\PinyCore-debug` 现在落后两轮。新增文件至少包括 `scripts/piny_linux.py`、`scripts/piny_view_win32.py`、`scripts/piny_view_x11.py`、`tests/test_linux.py`、`tests/test_view_x11.py`，另有 `scripts/piny_tools.py`、`scripts/piny_view.py`、`tests/test_view.py`、`tools/check_repo.py`、四份文档与 `ci.yml`。照例保留对方的 `agents/openai.yaml`，同步后在该目录跑一次 `python -X utf8 -m unittest discover -s tests -t tests` 确认 175 tests 通过。
+2. **再同步一次已安装副本**（未完成项 5）：仓库化之后又改了 Linux 适配，`E:\Ele\Project\rm\PinyCore\.dsh\skills\PinyCore-debug` 现在落后两轮。新增文件至少包括 `scripts/piny_linux.py`、`scripts/piny_view_win32.py`、`scripts/piny_view_x11.py`、`tests/test_linux.py`、`tests/test_view_x11.py`，另有 `scripts/piny_tools.py`、`scripts/piny_view.py`、`tests/test_view.py`、`tools/check_repo.py`、四份文档与 `ci.yml`。照例保留对方的 `agents/openai.yaml`，同步后在该目录跑一次 `python -X utf8 -m unittest discover -s tests -t tests` 确认 179 tests 通过。
 3. 在固件侧改掉跟踪身份字符串（需先批准，见未完成项 3），然后跑一次基线 `record --seconds 20` 留档，作为后续优化的对照（未完成项 4 的前置）。
 4. 真正的下一步优化候选已定位（`Src/System/INS/INS.cpp:53-104` 的 ~946 Hz 轮询、单次 169 µs 且抖动仅 0.7 %），但用户明确表示那 17 % 是"想知道有没有浪费"而非瓶颈，所以**不要**在未获指示时改动 PinyCore 源码。
 5. 拿到第二台 Windows 机器（或一台 Linux 机器）时先跑 `doctor --portable`，核对 `source` 字段是否符合预期（未完成项 10、12）。

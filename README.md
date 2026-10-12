@@ -100,10 +100,11 @@ scripts/
   piny_view.py            模态框应答的分派层：平台无关的轮询/武装/重试循环
   piny_view_win32.py      Win32 后端（ctypes + user32，无第三方依赖）
   piny_view_x11.py        X11 后端（XTest，其次 XSendEvent）
-tests/                    175 个用例，全部在临时目录或打桩下运行，不依赖本机装了什么：
+tests/                    179 个用例，全部在临时目录或打桩下运行，不依赖本机装了什么：
                           test_debug.py（探针、烧录、liveness）、test_tools.py（可迁移性与探测）、
                           test_linux.py（Linux 发现层）、test_trace.py（质量门、导出校验）、
-                          test_view.py（模态框应答流程）、test_view_x11.py（X11 后端的几何与降级）
+                          test_view.py（模态框应答流程）、test_view_x11.py（X11 后端的几何、
+                          按钮识别、降级阶梯与 Xlib 错误处理器）
 tools/                    仓库自检与发布辅助，见下面「本地自检」一节：
                           check_repo.py、check_workflows.py、release_notes.py、smoke_doctor.py
 references/               pinycore.md（项目事实）、portability.md（迁移指南）
@@ -127,9 +128,11 @@ agents/openai.yaml        agent 清单
 
 CI 用 `python -X utf8 -m unittest discover -s tests -t tests`，因为本项目不依赖 `pytest`——**这个仓库里的每个脚本都只用标准库**，CI 里没有任何 pip 安装步骤。
 
-测试数在两个平台上因此完全一致：**175 个用例，跳过 2 个**。跳过的两个都是"这台机器上根本不存在的东西"，而不是藏起跑不过的断言：`%VAR%` 形式的安装目录展开（那是 Windows 专属词表，`os.path.expandvars` 在 POSIX 上不认这种写法），以及在既没有 user32 也没有 X display 的会话里跑模态框流程。X11 那一侧不是靠"跳过就算过"来交差的：`ci.yml` 的 `x11` 任务会先断言 `libX11`/`libXtst`/`libXft` 都加载成功、后端确实是 X11 后端，才让它跑测试。
+两个平台上**跑到的用例数一样（179），跳过的个数不一样**，因为跳过的正是"这个平台上没有对应代码路径"的那些：Windows 上是 2 个（符号链接权限，以及本机没有的 X display），Linux 上是 5 个（Windows 安装目录词表 `%VAR%` 展开、注册表、以及只描述内置 Windows 遍历的那几条探测用例）。跳过的是"这台机器上根本不存在的东西"，而不是藏起跑不过的断言：`test_tools.py` 里 Windows 专属的用例用 `pt.inventory() is None` 守卫（也就是"本机走的就是内置遍历"），Linux 那一半的同一个契约由 `test_linux.py` 覆盖（26 条发现层用例）。X11 那一侧不是靠"跳过就算过"来交差的：`ci.yml` 的 `x11` 任务会先断言 `libX11`/`libXtst`/`libXft` 都加载成功、后端确实是 X11 后端，才让它跑测试。
 
 **尚未实测的部分要说清楚**：X11 后端在 CI 上验证的是"能连上裸 X server、几何计算与降级路径正确"，`button_layout` 用的 0.80/0.90 两个比例仍是 Windows 上的实测值，在 Linux 上属于假设——真正的 Linux 实板采集还没跑过。
+
+另外两条是第一次 Linux CI 跑出来的真实教训，值得单独记住：**（1）**`piny_view.py` 把转发项拷进后端模块时是"谁最后调用就留谁的补丁"，跨调用会留下状态——在真 X display 上表现成拿一个只存在于测试里的窗口句柄去查询，libX11 直接以 `BadWindow` 结束进程；现在转发项是**调用时**才解析的代理，补丁的作用范围跟调用者一致。**（2）**libX11 对未处理的协议错误是 `exit()`，不是异常，所以 X11 后端装了 `XSetErrorHandler`：窗口在"枚举到查询"之间消失时得到的是空结果，而不是一次没有报告的崩溃。
 
 ### 本地自检
 

@@ -26,7 +26,7 @@ HIDDEN = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
 # Kept in step with the release tag by .github/workflows/release.yml, which refuses to publish a
 # tag that disagrees with the scripts shipped under it. Bump this in the same commit as any
 # behaviour change worth a tag; a version that only lives in the README is a version nobody reads.
-__version__ = '0.2.0'
+__version__ = '0.2.1'
 
 
 def parse_mi(line):
