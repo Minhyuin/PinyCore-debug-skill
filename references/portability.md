@@ -1,4 +1,4 @@
-# Migrating PinyCore-debug to another Windows machine
+# Migrating PinyCore-debug to another machine (Windows or Linux)
 
 The package was developed against one rig. This file is what to do on the next one, and what
 "portable" does and does not mean here.
@@ -19,6 +19,17 @@ Copy-Item (Join-Path $skill 'profiles\pinycore.example.json') (Join-Path $skill 
 # 3. If doctor found the tools, write those paths in -- only when you ask for it by name.
 python $tool doctor --profile (Join-Path $skill 'profiles\my-rig.json') `
                     --write-profile (Join-Path $skill 'profiles\my-rig.json')
+```
+
+```bash
+# The same three steps on Linux/macOS-style shells.
+skill=<the skill directory on this machine>
+tool=$skill/scripts/piny_debug.py
+
+python "$tool" doctor --portable
+cp "$skill/profiles/pinycore.example.json" "$skill/profiles/my-rig.json"
+python "$tool" doctor --profile "$skill/profiles/my-rig.json" \
+                    --write-profile "$skill/profiles/my-rig.json"
 ```
 
 `usable: true` and an empty `problems[]` in the doctor output is the goal. Everything below
@@ -43,15 +54,22 @@ one file: `profiles/<rig>.json`.
 1. **The profile's own value**, whenever it points at a file that exists. An explicit
    configuration always wins, and discovery never rewrites a working profile behind your back.
 2. **PATH** (`shutil.which`), under the usual names: `arm-none-eabi-gdb`, `JLinkGDBServerCL`,
-   `JLinkGDBServer`, `SystemView`, `openocd`.
-3. **The conventional install directories** under `%ProgramFiles%`, `%ProgramFiles(x86)%`,
-   `%ProgramW6432%`, `%ProgramData%`, `%LOCALAPPDATA%\Programs`, `%USERPROFILE%\scoop\apps`,
-   `%ChocolateyInstall%` and the literal `C:\Program Files*`, matched against the layouts
-   `SEGGER/JLink*/`, `SEGGER/SystemView*/`, `OpenOCD/bin/`, `chocolatey/lib/openocd/...`.
-   A version-less directory (`SEGGER/JLink`) is preferred to a release-stamped one because it is
-   the name the user controls; stamped directories are the fallback.
+   `JLinkGDBServer`, `SystemView`, `openocd` -- and on Linux also `JLinkGDBServerCLExe`, which is
+   what SEGGER ships for a 64-bit Linux J-Link install.
+3. **The conventional install directories.** On Windows these are `%ProgramFiles%`,
+   `%ProgramFiles(x86)%`, `%ProgramW6432%`, `%ProgramData%`, `%LOCALAPPDATA%\Programs`,
+   `%USERPROFILE%\scoop\apps`, `%ChocolateyInstall%` and the literal `C:\Program Files*`; on Linux
+   `/usr/local/bin`, `/usr/bin`, `/opt/SEGGER`, `/opt`, `/usr/local`, `/snap/bin`, `/app`,
+   `~/.local/bin`, `~/.local/opt` and `$XDG_DATA_HOME`. Both are matched against the same layouts
+   (`SEGGER/JLink*/`, `SEGGER/SystemView*/`, `OpenOCD/bin/`, chocolatey's OpenOCD path,
+   `arm-gnu-toolchain*/bin`). A version-less directory (`SEGGER/JLink`) is preferred to a
+   release-stamped one because it is the name the user controls; stamped directories are the
+   fallback. On Linux a candidate must be executable, and a hit's label says which kind of
+   directory answered (`SEGGER J-Link GDB server (version-less)`).
 4. **The registry** (`HKLM\SOFTWARE\SEGGER\J-Link`, `HKLM\SOFTWARE\WOW6432Node\SEGGER\J-Link`,
-   and the matching SystemView keys), read through `winreg` only on Windows.
+   and the matching SystemView keys), read through `winreg` only on Windows. On Linux this step
+   does not exist and is not even listed in `searched` -- a registry lookup there would send you
+   looking for something the platform does not have.
 
 Every result carries the step that answered it (`source`: `profile`, `PATH: <name>`,
 `<install label>`, or `registry: <key>`), so a wrong answer is diagnosable rather than merely
@@ -119,18 +137,29 @@ machine actually has; a missing tool is reported, not invented.
 
 ## What has and has not been verified
 
-- Verified: the whole test suite (130 tests, `OK (skipped=1)`) runs against temporary directories
-  and patched probes, so it exercises the discovery logic without depending on this machine;
-  `doctor --portable` on the development rig reports every tool from `profile` with
+- Verified: the whole test suite (175 tests, `OK (skipped=2)`) runs against temporary directories
+  and patched probes, so it exercises the discovery logic without depending on this machine.
+  `test_tools.py` covers the Windows half, `test_linux.py` the Linux half (install bases, `%VAR%`
+  expansion, SEGGER's Linux executable spellings, version-less-directory preference, platform
+  dispatch), and `test_view_x11.py` the X11 licence-dialog backend.
+- Verified: `doctor --portable` on the development rig reports every tool from `profile` with
   `usable: true`; and a deliberately broken profile — `D:/code/PinyCore`, GDB and
   `JLinkGDBServerCL.exe` under `C:/Users/Someone/...` and `D:/Tools/...` — was recovered on this
   machine, with GDB found on PATH, J-Link found through `HKLM\SOFTWARE\SEGGER\J-Link`,
   SystemView and OpenOCD through their install directories, all four written out as
   `suggested_profile_overrides`, and the missing `project` directory reported. Evidence:
   `artifacts/portability-doctor`, `artifacts/portability-foreign`, `artifacts/portability-write`.
-- **Not verified: a second real machine.** `INSTALL_BASES` and the registry keys are written from
-  ordinary install layouts, not from a survey. On the first new machine, run `doctor --portable`
-  and check the `source` of each entry before trusting it.
+- Verified by CI, not by hand: `.github/workflows/ci.yml`'s `x11` job installs `xvfb`, `libx11-6`,
+  `libxtst6` and `libxft2`, starts a bare X server, asserts each library loads and that the chosen
+  backend really is `piny_view_x11`, and only then runs the suite. This is the only place the X11
+  code path is exercised against real X libraries.
+- **Not verified: a second real machine, and any Linux host driving the probe.** The Windows
+  `INSTALL_BASES` and the registry keys are written from ordinary install layouts, not from a
+  survey; the Linux bases are written the same way; and no Linux host has yet flashed this board or
+  captured a trace. The X11 dialog geometry reuses the Windows-measured 0.80/0.90 fractions, which
+  is why `click_accept` has a child-centre fallback and reports `where: fraction|child`. On the
+  first new machine, run `doctor --portable` and check the `source` of each entry before trusting
+  it, then `identify` before anything else.
 
 ## One wart, stated so it is not a surprise
 

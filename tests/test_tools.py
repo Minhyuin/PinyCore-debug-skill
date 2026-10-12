@@ -133,9 +133,16 @@ class DiscoverTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             jlink = touch(Path(t) / 'JLink.exe')
             companions = pt.jlink_companions(touch(Path(t) / 'JLinkGDBServerCL.exe'))
+            linux = pt.companion_names('posix')
         self.assertTrue(companions['JLink.exe']['exists'])
         self.assertFalse(companions['JLinkRTTLogger.exe']['exists'])
         self.assertEqual(companions['JLink.exe']['path'], jlink)
+        # Which CLIs sit beside the server is a platform fact, not a constant: Linux spells the
+        # same two tools JLinkExe and JLinkRTTLoggerExe, and a Windows list would report both
+        # of them as missing on a machine that has them.
+        self.assertIn('JLinkExe', linux)
+        self.assertIn('JLinkRTTLoggerExe', linux)
+        self.assertNotIn('JLink.exe', linux)
 
     def test_an_already_correct_profile_yields_no_overrides_at_all(self):
         with tempfile.TemporaryDirectory() as t:

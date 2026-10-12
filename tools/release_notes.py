@@ -86,7 +86,7 @@ def main(argv):
     print()
     print(f'- Skills version: `{version}` (`scripts/piny_debug.py --version`)')
     print(f'- Tests: {test_count()} (`python -X utf8 -m unittest discover -s tests -t tests`)')
-    print('- Python 3.10+ on Windows; standard library only, no pip install')
+    print('- Python 3.10+ on Windows and Linux; standard library only, no pip install')
     print()
     if previous:
         print(f'## Changes since {previous}')

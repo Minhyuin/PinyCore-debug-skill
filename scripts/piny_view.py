@@ -1,29 +1,37 @@
 #!/usr/bin/env python3
-"""Dismiss the SEGGER SystemView non-commercial license dialog.
+"""Answer SEGGER SystemView's blocking licence dialog, on Windows or on Linux.
 
 Why this module exists
 ----------------------
-SystemView V3.60e shows a modal Qt dialog ("No Commercial-Use License | SEGGER
-SystemView V3.60e") before its window is created. While that dialog is open the
-process never parses its command line, so ``SystemView.exe -load R.svd -export
-out.csv -quit`` simply hangs until it is killed. The dialog therefore has to be
-answered by whoever drives the CLI.
+SystemView V3.60e shows a modal Qt dialog ("No Commercial-Use License | SEGGER SystemView
+V3.60e") before its window is created. While that dialog is open the process never parses its
+command line, so ``SystemView -load R.svd -export out.csv -quit`` simply hangs until it is
+killed. The dialog therefore has to be answered by whoever drives the CLI, and it has no flag
+to suppress it.
 
-The dialog exposes no command-line flag to suppress it. This module finds the
-dialog by window title, waits until its geometry is stable, and presses the
-"Accept" button. Everything it does is recorded so an artifact can show exactly
-which window was clicked and where.
+This file is the PLATFORM-NEUTRAL part: the titles and geometry both backends share, the choice
+of backend, and one report shape for both. The two backends are deliberately separate files,
+because the way a dialog is answered is the one thing that genuinely differs by platform:
 
-Coordinate-free fallback
-------------------------
-``--no-auto-accept-license`` lets the caller answer the dialog by hand; the
-routine then only observes and reports, never clicks.
+  * ``piny_view_win32`` posts window messages. It works on a locked desktop, where a
+    synthesised pointer move never lands (measured: a full-screen BitBlt comes back white and
+    ``GetForegroundWindow`` returns 0), but ``PostMessageW`` still reaches its window.
+  * ``piny_view_x11`` sends X events and, when that does not take, drives a real pointer click
+    through XTest. X11 has no exact equivalent of ``PostMessage``, so the fallback is not
+    optional there.
 
-Windows only. Python standard library only (ctypes).
+Both report the same keys, so a caller never has to care which one ran. A platform with no
+backend reports ``answered: False`` with a reason instead of pretending or raising: the caller
+is expected to run SystemView by hand there and can still parse the export.
+
+Python standard library only, like the rest of the package.
 """
 from __future__ import annotations
+
 import ctypes
-import ctypes.wintypes as wt
+import ctypes.wintypes
+import os
+import sys
 import time
 
 #: Title of the blocking modal. Matched case-insensitively as a substring.
@@ -44,390 +52,249 @@ CLICK_SETTLE_S = 0.35
 #: sighting before the first press, and this long between retries.
 DIALOG_ARM_S = 3.5
 RETRY_INTERVAL_S = 3.0
-
-_LEFTDOWN, _LEFTUP = 0x0002, 0x0004
-_WM_KEYDOWN, _WM_KEYUP = 0x0100, 0x0101
-_WM_LBUTTONDOWN, _WM_LBUTTONUP = 0x0201, 0x0202
-_MK_LBUTTON = 0x0001
-_VK_RETURN = 0x0D
-#: License-dialog button layout, measured on V3.60e (see button_layout).
+#: Titles of the modal boxes SystemView raises over its main window. They are ordinary Qt
+#: windows, not Win32 #32770 message boxes, so they are matched by title. While one is open
+#: every later control command is ignored, which makes a recording run that leaves one behind
+#: look exactly like a recorder that cannot reach the target.
+_MESSAGEBOX_TITLES = ('System Information', 'SystemView Error', 'SEGGER SystemView Error')
+#: License-dialog button layout. The padding values are measured on V3.60e and are toolkit
+#: metrics rather than Windows metrics, so both backends use them.
 BUTTON_PAD_PX = 14
 BUTTON_GAP_PX = 10
 BUTTON_EDGE_PX = 12
 BUTTON_BOTTOM_PX = 12
 BUTTON_HEIGHT_PX = 26
 BUTTON_FONT_PX = 9
-BUTTON_FONT = 'Segoe UI'
+
+#: How long to let a freshly started SystemView settle before the first press, per platform.
+#: The Windows value was measured against V3.60e; the X11 one has NOT been measured on a real
+#: X session -- it is a deliberately generous starting point, and `accept_license` retries
+#: every `RETRY_INTERVAL_S` while the dialog is up, so arriving early costs one retry rather
+#: than the run. Lowering it on a real machine is a measurement, not a guess to copy from here.
+ARM_SECONDS = {'nt': DIALOG_ARM_S, 'posix': 4.0}
+
+#: Backend module per platform, most capable first. Resolved at call time rather than imported
+#: at module level: a Windows-only backend imported here would make this file unimportable on
+#: Linux, and each backend imports the constants above, so an eager import would also be a
+#: circular one. The list is a tuple so a caller (or a test) can see the whole preference order
+#: instead of having to infer it.
+BACKENDS = {
+    'nt': ('piny_view_win32',),
+    'posix': ('piny_view_x11',),
+}
+
+
+def _candidates():
+    """Backend module names for this platform, in preference order."""
+    platform = 'nt' if os.name == 'nt' else 'posix'
+    return BACKENDS.get(platform, ())
+
+
+def backend():
+    """The first backend module that can actually work here, or None.
+
+    "Can work" is the backend's own answer, not a platform name: ``piny_view_x11`` reports
+    False when there is no X display (a plain SSH session, a container), because a backend
+    that cannot reach a display must not be chosen just because the platform matches.
+    """
+    import importlib
+    for name in _candidates():
+        try:
+            module = importlib.import_module(name)
+        except ImportError:
+            continue
+        try:
+            if module.available():
+                return module
+        except Exception:                    # a broken display is a reason, not a crash
+            continue
+    return None
+
+
+def backend_name():
+    """The backend that would be used, for a report. ``None`` when there is none."""
+    module = backend()
+    return module.__name__.rsplit('.', 1)[-1] if module is not None else None
 
 
 def available():
-    """True when the Windows window/dialog bridge can be used at all."""
-    return hasattr(ctypes, 'windll') and hasattr(ctypes.windll, 'user32')
+    """True when this machine can answer the dialog without a human."""
+    return backend() is not None
 
 
-def _user32():
-    if not available():
-        raise RuntimeError('License dialog handling requires Windows (user32 unavailable)')
-    return ctypes.windll.user32
+def _call(name, *args, **kwargs):
+    """Call a backend function, or raise an error that says why it cannot be called.
+
+    Raising is right for the functions that only run once a dialog has been found: by then the
+    caller has already established that a dialog exists, so a missing backend is a genuine
+    contradiction rather than a platform without support. The lookups that may legitimately
+    find nothing (``find_dialog`` and friends) return None instead.
+    """
+    module = backend()
+    if module is None:
+        raise RuntimeError('License dialog handling needs a supported desktop session: on '
+                           'Windows user32, on Linux an X display (and XTest). This session '
+                           'has neither, so the dialog has to be answered by hand.')
+    _overlay(module)
+    return getattr(module, name)(*args, **kwargs)
 
 
-def _enumerate_windows(user32):
-    """Visible top-level windows as dicts: hwnd, title, pid, class, rect."""
-    found = []
-    proto = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+#: The backend surface this module forwards. A forwarding entry is a stand-in for a platform
+#: function, so a caller (or a test) can replace it here -- ``piny_view.child_windows = fake`` --
+#: without having to reach into the backend module by name. Only entries that were REPLACED are
+#: pushed down; see ``_overlay``. ``_pid`` is deliberately absent: which process owns a window is
+#: a genuinely per-platform question (``GetWindowThreadProcessId`` versus the ``_NET_WM_PID``
+#: property, which X11 may not even have), so each backend answers it inside its own ``windows()``
+#: rather than being forced into a shared shape.
+_FORWARDED = ('_text_width', '_stable_rect', '_client_size', '_enumerate_windows',
+              '_child_text', 'windows', 'child_windows', 'find_dialog', 'find_main_window',
+              'find_message_box')
 
-    def visit(hwnd, _):
-        if user32.IsWindowVisible(hwnd):
-            length = user32.GetWindowTextLengthW(hwnd)
-            if length:
-                buffer = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buffer, length + 1)
-                rect = wt.RECT()
-                user32.GetWindowRect(hwnd, ctypes.byref(rect))
-                cls = ctypes.create_unicode_buffer(256)
-                user32.GetClassNameW(hwnd, cls, 256)
-                found.append({'hwnd': hwnd, 'title': buffer.value, 'class': cls.value,
-                              'rect': (rect.left, rect.top, rect.right, rect.bottom)})
-        return True
 
-    user32.EnumWindows(proto(visit), 0)
-    return found
+def _overlay(module):
+    """Push a REPLACED forwarding entry into ``module``, so the backend really uses it.
+
+    An entry still holding its original forwarding function must NOT be pushed down: it forwards
+    to the same name in the backend, so putting it there would make the call recurse until the
+    stack runs out. The marker attribute on each forwarding function is what distinguishes the
+    two cases, and it is the whole reason this is not a plain ``setattr`` loop.
+    """
+    for name in _FORWARDED:
+        replacement = globals().get(name)
+        if replacement is None or getattr(replacement, '_dispatch_forward', False):
+            continue
+        setattr(module, name, replacement)
+
+
+def _text_width(text, extent=BUTTON_FONT_PX):
+    """Measure a button label. Forwarded so a caller can pin the font metric."""
+    return _call('_text_width', text, extent)
+_text_width._dispatch_forward = True
+
+
+def _optional(name, default, *args, **kwargs):
+    """Call a backend function when there is one, else return ``default``."""
+    module = backend()
+    if module is None or not hasattr(module, name):
+        return default
+    _overlay(module)
+    return getattr(module, name)(*args, **kwargs)
 
 
 def windows(process_id=None):
     """Visible top-level windows, optionally filtered to one process id."""
-    return [w for w in _enumerate_windows(_user32())
-            if process_id is None or w['hwnd'] and _pid(w['hwnd']) == process_id]
-
-
-#: Titles of the modal boxes SystemView raises over its main window. They are ordinary Qt
-#: windows (class QWidget), not Win32 #32770 message boxes, so they are matched by title.
-#: While one is open every later control command is ignored, which makes a recording run
-#: that leaves one behind look exactly like a recorder that cannot reach the target.
-MESSAGEBOX_TITLES = ('System Information', 'SystemView Error', 'SEGGER SystemView Error')
-
-
-def _child_text(user32, parent):
-    """Text of every child control of a window, in creation order.
-
-    Qt renders its own widgets and exposes no message text here, so this is usually empty;
-    it is kept because a Win32 message box, if one ever appears, states the reason in these
-    static controls.
-    """
-    texts = []
-    proto = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
-
-    def visit(hwnd, _):
-        length = user32.GetWindowTextLengthW(hwnd)
-        if length:
-            buffer = ctypes.create_unicode_buffer(length + 1)
-            user32.GetWindowTextW(hwnd, buffer, length + 1)
-            if buffer.value and not buffer.value.startswith('qt_'):
-                texts.append(buffer.value)
-        return True
-
-    user32.EnumChildWindows(parent, proto(visit), 0)
-    return texts
-
-
-def find_message_box(process_id=None):
-    """The open SystemView modal box, if any, with its text and child widget count."""
-    for window in _enumerate_windows(_user32()):
-        title = window['title']
-        if not any(title.startswith(known) for known in MESSAGEBOX_TITLES):
-            continue
-        if process_id is not None and _pid(window['hwnd']) != process_id:
-            continue
-        return {'hwnd': window['hwnd'], 'title': title, 'rect': window['rect'],
-                'text': _child_text(_user32(), window['hwnd'])}
-    return None
-
-
-def _pid(hwnd):
-    owner = wt.DWORD()
-    _user32().GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
-    return owner.value
-
-
-def _alive(process_id):
-    """True while a process id still exists, without holding a handle to it."""
-    kernel32 = ctypes.windll.kernel32
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    STILL_ACTIVE = 259
-    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(process_id))
-    if not handle:
-        return False
-    try:
-        code = wt.DWORD()
-        if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-            return code.value == STILL_ACTIVE
-        return True
-    finally:
-        kernel32.CloseHandle(handle)
+    return _optional('windows', [], process_id)
+windows._dispatch_forward = True
 
 
 def find_dialog(process_id=None):
-    """The license dialog window, or None."""
-    for window in windows():
-        if DIALOG_TITLE.casefold() in window['title'].casefold():
-            if process_id is None or _pid(window['hwnd']) == process_id:
-                return window
-    return None
+    """The licence dialog's window, or None."""
+    return _optional('find_dialog', None, process_id)
+find_dialog._dispatch_forward = True
 
 
 def find_main_window(process_id=None, timeout=0.0, poll=0.25):
-    """The SystemView main window, or None.
-
-    The main window only exists after the license dialog has been answered, so it is the
-    signal that the application really moved on rather than merely hiding its modal.
-    """
-    deadline = time.monotonic() + max(0.0, timeout)
-    while True:
-        for window in windows():
-            if DIALOG_TITLE.casefold() in window['title'].casefold():
-                continue
-            if MAIN_TITLE.casefold() in window['title'].casefold():
-                if process_id is None or _pid(window['hwnd']) == process_id:
-                    return window
-        if time.monotonic() >= deadline:
-            return None
-        time.sleep(poll)
+    """The SystemView main window, waiting up to ``timeout`` seconds for it to appear."""
+    return _optional('find_main_window', None, process_id, timeout, poll)
+find_main_window._dispatch_forward = True
 
 
-def _stable_rect(window, timeout=5.0, interval=0.15):
-    """Wait until a window's rect stops changing so the click lands where it was measured."""
-    user32 = _user32()
-    previous = window['rect']
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        time.sleep(interval)
-        rect = wt.RECT()
-        user32.GetWindowRect(window['hwnd'], ctypes.byref(rect))
-        current = (rect.left, rect.top, rect.right, rect.bottom)
-        if current == previous and (rect.right - rect.left) > 100:
-            return current
-        previous = current
-    return previous
-
-
-def _text_width(text, extent=BUTTON_FONT_PX):
-    """Rendered width of a label in the dialog's font, in pixels."""
-    user32, gdi32 = _user32(), ctypes.windll.gdi32
-    hdc = user32.GetDC(0)
-    gdi32.CreateFontW.restype = ctypes.c_void_p
-    font = gdi32.CreateFontW(-extent, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 0, 0, BUTTON_FONT)
-    previous = gdi32.SelectObject(hdc, ctypes.c_void_p(font))
-    size = wt.SIZE()
-    gdi32.GetTextExtentPoint32W(hdc, text, len(text), ctypes.byref(size))
-    gdi32.SelectObject(hdc, ctypes.c_void_p(previous))
-    gdi32.DeleteObject(ctypes.c_void_p(font))
-    user32.ReleaseDC(0, hdc)
-    return size.cx
-
-
-def _client_size(window):
-    """Client width and height of a window, in the caller's DPI-virtualised coordinates."""
-    client = wt.RECT()
-    _user32().GetClientRect(window['hwnd'], ctypes.byref(client))
-    return client.right, client.bottom
-
-
-def button_layout(window, client=None):
-    """Where the license dialog's three buttons are, in CLIENT coordinates.
-
-    The buttons cannot be enumerated: the dialog reports no child windows and Qt exposes no
-    accessible children, so they only exist as painted pixels. SEGGER lays them out right to
-    left as Decline, Accept, License Manager, each as wide as its label in 9 pt Segoe UI plus
-    14 px of padding, 10 px apart, 12 px from the right and bottom client edges and 26 px tall.
-    Verified twice on V3.60e by pressing each computed centre:
-      - exp53 in a DPI-aware process, client 900x441: (859,418) declined and exited rc=1,
-        (793,418) did nothing, (708,418) opened the main window 'SEGGER SystemView V3.60e';
-      - exp54 in a DPI-unaware process, client 720x352: (613,327) accepted and the command
-        server came up 2 s later, while (679,327) and (528,327) are Decline and License Manager.
-    The client size differs between the two only because Windows virtualises coordinates by the
-    caller's DPI awareness; the layout is computed inside the client rect, so both agree.
-    """
-    width, height = client or _client_size(window)
-    if width < 100 or height < 60:
-        raise RuntimeError(f'License dialog client area looks wrong: {width}x{height}')
-    result = {}
-    x = width - BUTTON_EDGE_PX
-    for name in ('Decline', 'Accept', 'License Manager'):
-        span = _text_width(name) + 2 * BUTTON_PAD_PX
-        x -= span
-        result[name] = {'centre': (x + span // 2, height - BUTTON_BOTTOM_PX - BUTTON_HEIGHT_PX // 2),
-                        'span': [x, x + span], 'client': [width, height]}
-        x -= BUTTON_GAP_PX
-    return result
-
-
-def post_click(window, point):
-    """Press a point of the dialog with a POSTED mouse message.
-
-    This is what works while the console is locked: the lock screen owns the screen, so
-    SetCursorPos and mouse_event are delivered to a desktop nobody can see and the dialog never
-    receives them (measured: explorer's 'Backstop Window' is the window at every point of the
-    dialog, and a full-screen capture returns the lock screen). A posted message does not need
-    the input desktop, and Qt DOES hit-test it: a press in the dialog body or title bar does
-    nothing, while a press on a button acts.
-    """
-    user32 = _user32()
-    hwnd = window['hwnd']
-    x, y = int(point[0]), int(point[1])
-    lparam = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
-    down = bool(user32.PostMessageW(hwnd, _WM_LBUTTONDOWN, _MK_LBUTTON, lparam))
-    time.sleep(0.12)
-    up = bool(user32.PostMessageW(hwnd, _WM_LBUTTONUP, 0, lparam))
-    return {'posted': down and up, 'down': down, 'up': up, 'client_point': [x, y],
-            'hwnd': hwnd, 'dialog_rect': list(window['rect']), 'method': 'post-click'}
-
-
-def post_enter(window):
-    """DEPRECATED -- posting Return to the license dialog DECLINES it and exits SystemView.
-
-    Kept as a recorded trap rather than a tool: the dialog vanishes, which looks like success,
-    but the process then exits with rc=1 (measured twice, exp42/43). Enter on this dialog is the
-    negative path; never use it to answer the modal. Use ``post_click`` on the Accept button.
-    """
-    user32 = _user32()
-    hwnd = window['hwnd']
-    down = bool(user32.PostMessageW(hwnd, _WM_KEYDOWN, _VK_RETURN, 0))
-    time.sleep(CLICK_SETTLE_S)
-    up = bool(user32.PostMessageW(hwnd, _WM_KEYUP, _VK_RETURN, 0))
-    return {'posted': down and up, 'keydown': down, 'keyup': up, 'hwnd': hwnd,
-            'dialog_rect': list(window['rect']), 'method': 'post-return-declines'}
-
-
-def click_accept(window, fraction=ACCEPT_FRACTION, process_id=None):
-    """Press the Accept button of the license dialog.
-
-    Attempts, in order: a posted press on Accept's computed client position (works on a locked
-    desktop), then the synthetic mouse sequence a human click produces -- foreground the dialog,
-    move the cursor over the button, then send a left-button down/up pair. The fallback keeps the
-    historical fixed-fraction point (measured on V3.60e: (988,588) for rect (401,237)-(1135,627)).
-    """
-    user32 = _user32()
-    left, top, right, bottom = _stable_rect(window)
-    if right - left < 100 or bottom - top < 100:
-        raise RuntimeError(f'License dialog geometry looks wrong: {(left, top, right, bottom)}')
-    buttons = button_layout(window)
-    posted = post_click(window, buttons['Accept']['centre'])
-    posted['button'] = buttons
-    time.sleep(CLICK_SETTLE_S)
-    if find_dialog(process_id) is None:
-        posted['confirmed'] = True
-        return posted
-    # Fallback for an unlocked console: the fraction is applied to the CLIENT area, whose live
-    # size is authoritative here (window rects may be DPI-virtualised for this process).
-    client_width, client_height = _client_size(window)
-    x = int(right - client_width + client_width * fraction[0])
-    y = int(bottom - client_height + client_height * fraction[1])
-    user32.SetForegroundWindow(window['hwnd'])
-    time.sleep(CLICK_SETTLE_S)
-    user32.SetCursorPos(x, y)
-    time.sleep(CLICK_SETTLE_S)
-    user32.mouse_event(_LEFTDOWN, 0, 0, 0, 0)
-    time.sleep(0.05)
-    user32.mouse_event(_LEFTUP, 0, 0, 0, 0)
-    return {'clicked': True, 'x': x, 'y': y, 'dialog_rect': [left, top, right, bottom],
-            'fraction': list(fraction), 'method': 'mouse',
-            'posted_first': posted, 'button': buttons}
+def find_message_box(process_id=None):
+    """A modal box raised over the main window, or None."""
+    return _optional('find_message_box', None, process_id)
+find_message_box._dispatch_forward = True
 
 
 def child_windows(hwnd):
-    """Every child window of hwnd as dicts with class, text and rectangle."""
-    user32 = _user32()
-    found = []
-    proto = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
-
-    def visit(child, _):
-        rect = wt.RECT()
-        user32.GetWindowRect(child, ctypes.byref(rect))
-        cls = ctypes.create_unicode_buffer(256)
-        user32.GetClassNameW(child, cls, 256)
-        length = user32.GetWindowTextLengthW(child)
-        buffer = ctypes.create_unicode_buffer(length + 1)
-        user32.GetWindowTextW(child, buffer, length + 1)
-        found.append({'hwnd': child, 'class': cls.value, 'text': buffer.value,
-                      'rect': (rect.left, rect.top, rect.right, rect.bottom)})
-        return True
-
-    user32.EnumChildWindows(hwnd, proto(visit), 0)
-    return found
+    """Child windows of ``hwnd``. Empty is the normal answer on both platforms."""
+    return _optional('child_windows', [], hwnd)
+child_windows._dispatch_forward = True
 
 
 def find_default_button(window):
-    """The button-like child of a dialog, as a point at its centre.
-
-    SystemView's Qt boxes carry no button text and their size changes with the content,
-    so a fixed offset from the window rectangle cannot be trusted: the '43466 Events
-    Loaded' box measured 518x497 and its OK button was the small wide widget in the
-    bottom band. Picking that widget by shape finds the button on any box layout, and a
-    caller that gets None falls back to a fraction of the rectangle.
-    """
-    left, top, right, bottom = window['rect']
-    height = bottom - top
-    candidates = []
-    for child in child_windows(window['hwnd']):
-        c_left, c_top, c_right, c_bottom = child['rect']
-        width, child_height = c_right - c_left, c_bottom - c_top
-        if width < 50 or child_height < 15 or child_height > 60:
-            continue
-        if not 1.0 <= width / child_height <= 8.0:
-            continue
-        if c_top < bottom - height * 0.3:      # buttons sit in the bottom band
-            continue
-        candidates.append((width * child_height, child['rect']))
-    if not candidates:
-        return None
-    _, (c_left, c_top, c_right, c_bottom) = min(candidates)
-    return {'point': ((c_left + c_right) // 2, (c_top + c_bottom) // 2),
-            'rect': [c_left, c_top, c_right, c_bottom]}
+    """The dialog's default button, or None when the toolkit exposes no child controls."""
+    return _optional('find_default_button', None, window)
 
 
-def dismiss_message_box(process_id=None, fraction=None):
-    """Read and close one open SystemView message box. Returns None when there is none.
+def arm_seconds(platform=None):
+    """The settle delay to use before the first press on this platform."""
+    key = platform or ('nt' if os.name == 'nt' else 'posix')
+    return ARM_SECONDS.get(key, DIALOG_ARM_S)
 
-    SystemView reports recorder and import trouble in a modal Qt box (observed titles
-    'System Information | SEGGER SystemView V3.60e' and 'SystemView Error'). It does not
-    answer the control socket while such a box is open, so an unattended recording run has
-    to close it; the box's own button is located by shape rather than by a fraction of the
-    rectangle, since these boxes resize with their content.
-    """
-    box = find_message_box(process_id)
-    if box is None:
-        return None
-    report = {'title': box['title'], 'text': box['text'], 'rect': list(box['rect']),
-              'child_windows': len(child_windows(box['hwnd'])), 'button': None, 'dismissed': None}
-    button = find_default_button(box)
-    report['button'] = button
-    try:
-        if button is not None:
-            report['dismissed'] = click_point(box, button['point'])
-        else:
-            report['dismissed'] = click_accept(box, fraction or DEFAULT_BUTTON_FRACTION)
-    except RuntimeError as exc:
-        report['dismissed'] = {'clicked': False, 'error': str(exc)}
-    return report
+
+def button_layout(window, client=None):
+    """Where the dialog's buttons are, in window coordinates."""
+    return _call('button_layout', window, client)
+
+
+def post_click(window, point):
+    """Press a point of a window directly, without moving the pointer."""
+    return _call('post_click', window, point)
+
+
+def post_enter(window):
+    """Post Return to a window. Recorded as a dead end: it DECLINES the licence."""
+    return _call('post_enter', window)
 
 
 def click_point(window, point, settle=CLICK_SETTLE_S):
-    """Press the left mouse button at an absolute screen point, over this window."""
-    user32 = _user32()
-    x, y = int(point[0]), int(point[1])
-    user32.SetForegroundWindow(window['hwnd'])
-    time.sleep(settle)
-    user32.SetCursorPos(x, y)
-    time.sleep(settle)
-    user32.mouse_event(_LEFTDOWN, 0, 0, 0, 0)
-    time.sleep(0.05)
-    user32.mouse_event(_LEFTUP, 0, 0, 0, 0)
-    return {'clicked': True, 'x': x, 'y': y}
+    """Press the pointer at a point of a window."""
+    return _call('click_point', window, point, settle)
+
+
+def click_accept(window, fraction=ACCEPT_FRACTION, process_id=None):
+    """Press the dialog's Accept button, preferring a posted click over a real one."""
+    return _call('click_accept', window, fraction, process_id)
+
+
+#: What ``dismiss_message_box`` reports when there is no box to dismiss. A dict rather than None
+#: because callers test it for truthiness and then read keys out of it -- ``piny_trace`` polls
+#: exactly that way -- so "nothing was there" has to be a report, not an absence.
+_MESSAGEBOX_ABSENT = {'seen': False, 'dismissed': False, 'title': None,
+                      'note': 'no message box'}
+
+
+def dismiss_message_box(process_id=None, fraction=None):
+    """Dismiss a SystemView message box if one is up. Reports what it saw."""
+    return _optional('dismiss_message_box', dict(_MESSAGEBOX_ABSENT), process_id, fraction)
+
+
+def _alive(process_id):
+    """True when ``process_id`` is still running. Used to tell refusal from acceptance.
+
+    Kept here rather than in a backend because it needs no window system, and because both
+    platforms have a case where a process that has just exited is still listed: Windows keeps a
+    handle open (exit code 259 is STILL_ACTIVE) and Linux keeps a zombie entry in /proc.
+    """
+    if not process_id:
+        return False
+    if os.name == 'nt':
+        process = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(process_id))
+        if not process:
+            return False
+        try:
+            code = ctypes.wintypes.DWORD()
+            ctypes.windll.kernel32.GetExitCodeProcess(process, ctypes.byref(code))
+            return code.value == 259
+        finally:
+            ctypes.windll.kernel32.CloseHandle(process)
+    try:
+        with open('/proc/%d/stat' % int(process_id), 'rb') as handle:
+            fields = handle.read().rsplit(b')', 1)[-1].split()
+        return bool(fields) and fields[0] != b'Z'
+    except (OSError, ValueError):
+        pass
+    try:
+        os.kill(int(process_id), 0)
+    except OSError as error:
+        return getattr(error, 'errno', None) == 1        # EPERM: alive, just not ours
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def accept_license(process_id=None, timeout=30.0, auto_accept=True, poll=0.25, fraction=None,
-                   arm_seconds=DIALOG_ARM_S, retry_interval=RETRY_INTERVAL_S,
-                   main_window_timeout=0.0):
+                   arm_seconds=None, retry_interval=RETRY_INTERVAL_S, main_window_timeout=0.0):
     """Answer the SystemView license dialog.
 
     Returns a report dict. ``answered`` is True when the dialog was seen and is gone from
@@ -441,13 +308,23 @@ def accept_license(process_id=None, timeout=30.0, auto_accept=True, poll=0.25, f
     modal was dismissed" from "the application actually continued": an accepted dialog
     whose main window never appears means the launch is wedged and the caller should
     restart the process instead of waiting for an export that cannot happen.
+
+    The loop lives here rather than in a backend because it encodes a trap that is the same on
+    both platforms: the dialog vanishes for BOTH answers, so a missing dialog is not proof of
+    consent. Enter (or Decline) withdraws it and SystemView then exits rc=1, which is why the
+    process is checked before ``answered`` is set. Measured on Windows: posted Return -> dialog
+    gone 1 s later, rc=1.
     """
+    import time
     report = {'dialog_seen': False, 'auto_accept': bool(auto_accept), 'answered': False,
               'waited_seconds': 0.0, 'title': None, 'rect': None, 'clicks': [],
-              'main_window': None, 'method': None, 'note': None}
+              'main_window': None, 'method': None, 'backend': backend_name(), 'note': None}
     if not available():
-        report['note'] = 'not Windows: license dialog must be answered manually'
+        report['note'] = ('no dialog backend for this session: answer the license dialog by '
+                          'hand, or run SystemView with a display attached '
+                          '(Windows: user32; Linux: an X display with XTest)')
         return report
+    arm_seconds = arm_seconds if arm_seconds is not None else sys.modules[__name__].arm_seconds()
     start = time.monotonic()
     dialog = None
     while time.monotonic() - start < timeout:
@@ -470,9 +347,6 @@ def accept_license(process_id=None, timeout=30.0, auto_accept=True, poll=0.25, f
     while time.monotonic() - start < timeout:
         current = find_dialog(process_id)
         if current is None:
-            # The dialog vanishes for BOTH answers. Enter (or the Decline button) withdraws it
-            # and then SystemView exits rc=1, so a missing dialog alone is NOT proof of consent:
-            # check the process. Measured: posted Return -> dialog gone 1 s later, rc=1.
             if process_id is not None and not _alive(process_id):
                 report['note'] = ('the license dialog vanished but SystemView exited; the modal '
                                   'was DECLINED, not accepted (posting Return does this)')

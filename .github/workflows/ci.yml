@@ -41,6 +41,70 @@ jobs:
           python -X utf8 scripts/piny_debug.py --version
           python -X utf8 scripts/piny_trace.py --version
 
+  # The Windows and Linux halves of the package are genuinely different code -- a Win32 backend and
+  # an X11 backend for the same licence dialog, and two different install-directory vocabularies --
+  # so the Linux-only modules need a Linux job that actually loads libX11. Nothing here needs a
+  # probe, a board or a SEGGER install: the X server is a bare Xvfb, which is exactly the
+  # window-manager-less case the X11 backend's root-window fallback exists to serve.
+  x11:
+    name: Linux X11 backend (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # Installed by name because the modules load these with ctypes at call time: a missing
+      # libX11 is caught and reported (never raised), so without them the X11 code paths would be
+      # skipped silently and the job would be green while testing nothing.
+      - name: Install the X11 client libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb libx11-6 libxtst6 libxft2
+
+      - name: Fail if a library the backend needs is missing
+        run: |
+          python - <<'PY'
+          import ctypes.util, sys
+          missing = [n for n in ('X11', 'Xtst', 'Xft') if not ctypes.util.find_library(n)]
+          print('missing libraries:', missing or 'none')
+          sys.exit(1 if missing else 0)
+          PY
+
+      - name: Start a bare X server
+        run: |
+          Xvfb :99 -screen 0 1280x1024x24 &
+          for _ in $(seq 1 20); do
+            if [ -S /tmp/.X11-unix/X99 ]; then break; fi
+            sleep 0.5
+          done
+          ls -l /tmp/.X11-unix/
+
+      - name: The X11 backend is loaded, not skipped
+        run: |
+          python -X utf8 - <<'PY'
+          import sys
+          sys.path.insert(0, 'scripts')
+          import piny_view, piny_view_x11
+          assert piny_view.backend_name() == 'piny_view_x11', piny_view.backend_name()
+          assert piny_view_x11.pointer_available(), 'libXtst did not load'
+          assert piny_view_x11.windows() == [], 'an empty Xvfb should report no client windows'
+          print('backend:', piny_view.backend_name())
+          PY
+        env:
+          DISPLAY: ':99'
+
+      - name: Unit tests under a display
+        run: python -X utf8 -m unittest discover -s tests -t tests -v
+        env:
+          DISPLAY: ':99'
+
   repo-checks:
     name: repository self-checks
     runs-on: ubuntu-latest

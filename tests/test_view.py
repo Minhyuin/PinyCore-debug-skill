@@ -55,10 +55,13 @@ class _FakeView:
         case.addCleanup(restore)
 
 
-@unittest.skipUnless(sys.platform == 'win32',
-                     'answering the licence dialog is Windows-only: piny_view.py declares that '
-                     'boundary by returning "not Windows: license dialog must be answered '
-                     'manually", so these assertions are about code no other platform reaches')
+#: Skipped only where no backend can be chosen at all -- no user32, or no X display. The assertions
+#: below run against ``_FakeView``, so they describe the dispatcher's poll/arm/retry loop, which is
+#: the same code on every platform; what the skip says is that piny_view itself would report it has
+#: no dialog handling to offer, so there would be nothing to drive.
+@unittest.skipUnless(v.available(),
+                     'no dialog backend in this session (needs user32 on Windows, an X display on '
+                     'Linux), so accept_license can only report and never act')
 class LicenseDialogTests(unittest.TestCase):
     def test_absent_dialog_is_not_an_error(self):
         fake = _FakeView(dialog_calls=0)
@@ -178,12 +181,13 @@ class LicenseDialogTests(unittest.TestCase):
         self.assertNotIn(v.DIALOG_TITLE.casefold(), MAIN['title'].casefold())
         self.assertIn(v.MAIN_TITLE.casefold(), MAIN['title'].casefold())
 
-    def test_unavailable_windows_reports_instead_of_raising(self):
+    def test_a_session_without_a_dialog_backend_reports_instead_of_raising(self):
         if v.available():
-            self.skipTest('running on Windows: the bridge is available')
+            self.skipTest('this session has a dialog backend (user32 or an X display)')
         report = v.accept_license(timeout=0.1)
         self.assertFalse(report['answered'])
-        self.assertIn('not Windows', report['note'])
+        self.assertIsNone(report['backend'])
+        self.assertIn('no dialog backend', report['note'])
 
 
 class MessageBoxTests(unittest.TestCase):
@@ -225,10 +229,10 @@ class MessageBoxTests(unittest.TestCase):
     def test_message_box_titles_do_not_match_the_main_window(self):
         for title in ['SEGGER SystemView V3.60e',
                       'SEGGER SystemView V3.60e - live.svdat - FreeRTOS Demo Application']:
-            self.assertFalse(any(title.startswith(known) for known in v.MESSAGEBOX_TITLES))
+            self.assertFalse(any(title.startswith(known) for known in v._MESSAGEBOX_TITLES))
         for title in ['System Information | SEGGER SystemView V3.60e',
                       'SystemView Error', 'SEGGER SystemView Error']:
-            self.assertTrue(any(title.startswith(known) for known in v.MESSAGEBOX_TITLES))
+            self.assertTrue(any(title.startswith(known) for known in v._MESSAGEBOX_TITLES))
 
 
 if __name__ == '__main__':

@@ -9,7 +9,7 @@
 
 1. 启动 GDB，读取 MCU 寄存器/符号变量（`scripts/piny_debug.py`）。
 2. 用 SEGGER SystemView 采集实板 CPU 负载并给出可比较的报告（`scripts/piny_trace.py`）。
-3. 模态授权框的自动应答（`scripts/piny_view.py`，被上面两个脚本共用）。
+3. 模态授权框的自动应答（`scripts/piny_view.py` 分派 + `scripts/piny_view_win32.py` / `scripts/piny_view_x11.py` 两套后端，被上面两个脚本共用）。
 
 **换机器（可迁移性，2026-10-12 完成）**：脚本里没有写死任何本机路径，全部从 `--profile` 的 JSON 读取；换机器的动作就是让那份 JSON 在目标机器上成立。`doctor --portable` 会按 profile → PATH → 常见安装目录 → SEGGER 注册表的顺序探测每个工具、**报出是哪一步命中的**，并打印可直接粘贴的 profile 修正；`--write-profile <path>` 才写文件（必须点名）。`profiles/pinycore.example.json` 是模板。`jlink_serial` 缺失只报告、不猜。
 
@@ -141,14 +141,17 @@ python -X utf8 scripts\piny_trace.py record --output artifacts\board-run8 --seco
 | `tools/smoke_doctor.py` | 只用示例/占位 profile 走一遍 `doctor`，断言"每个必需工具要么被解析出来、要么被点名成问题" |
 | `tools/release_notes.py` | 按 conventional commit 类型生成中英双语发布说明，测试数字从文档读而不是重写一遍 |
 | `scripts/piny_debug.py` | 命令 `doctor` / `license-check` / `identify` / `registers` / `flash` / `capture`；类 `OpenOCD`、`JLinkGDBServer`、`GDB`、`ProbeSession`、`ProbeLock`；工具解析 `tool_path`/`tick_symbol_from_elf` |
-| `scripts/piny_tools.py` | **可迁移性核心**：`find_tool`/`discover`/`search_path`/`search_install_directories`/`search_registry`/`jlink_companions`/`profile_overrides`/`portability_report`；只用标准库 |
+| `scripts/piny_tools.py` | **可迁移性核心**：`find_tool`/`discover`/`search_path`/`search_install_directories`/`search_registry`/`jlink_companions`/`profile_overrides`/`portability_report`；只用标准库。平台无关的入口，按平台分派到下面的模块 |
+| `scripts/piny_linux.py` | Linux 侧发现层：`/opt/SEGGER/JLink*`、`/usr/bin`、`~/.local/bin` 等基目录，SEGGER 的 Linux 可执行文件名（`JLinkGDBServerCLExe`），版本号目录优先于带版本戳目录 |
 | `scripts/piny_trace.py` | 命令只有 `analyze` / `compare` / `record`（没有 `doctor`/`capture`）；`summarize`、`validate_export`、`systemview_export`、`systemview_record` |
-| `scripts/piny_view.py` | 模态框自动应答：`button_layout`、`post_click`、`post_enter`（陷阱，保留作记录）、`accept_license`、`find_dialog`/`find_main_window` |
+| `scripts/piny_view.py` | 模态框应答的**分派层**：平台无关的轮询/武装/重试循环、`_alive`、转发给后端的窗口查找（`find_dialog`/`find_main_window`/`child_windows`） |
+| `scripts/piny_view_win32.py` | Win32 后端：`button_layout`、`post_click`、`post_enter`（陷阱，保留作记录）、`find_default_button`、`click_accept`；ctypes + user32 |
+| `scripts/piny_view_x11.py` | X11 后端：XTest → `XSendEvent` → 如实失败的阶梯，Xft 量文字宽度，无 `DISPLAY` 时返回 None 而不是崩 |
 | `profiles/pinycore.json` | 探针/工具链/速率/RAM 区/期望设备 ID；含 `jlink_note` 与 `jlink_speed_note` |
 | `profiles/pinycore.example.json` | 新机器用的模板：占位路径 + 每个键的用途注释，`doctor --portable` 会指出要改哪几个 |
 | `references/pinycore.md` | PinyCore 项目工具链与验证事实 |
-| `references/portability.md` | 迁移到另一台 Windows 机器的完整说明：发现顺序、机器键 vs 目标键、速率是测量值不是偏好、serial 不猜、错误信息、严格模式、已验证/未验证边界 |
-| `tests/` | `test_debug.py`、`test_trace.py`、`test_view.py`、`test_tools.py`；基线 `python -X utf8 -m unittest discover -s tests -t tests` → **130 tests, OK (skipped=1)** |
+| `references/portability.md` | 迁移到另一台机器的完整说明：发现顺序、机器键 vs 目标键、速率是测量值不是偏好、serial 不猜、错误信息、严格模式、Windows/Linux 各自的差异点、已验证/未验证边界 |
+| `tests/` | `test_debug.py`、`test_trace.py`、`test_view.py`、`test_view_x11.py`、`test_tools.py`、`test_linux.py`；基线 `python -X utf8 -m unittest discover -s tests -t tests` → **175 tests, OK (skipped=2)**（两个平台数字一致，见未完成项 12） |
 | `artifacts/portability-doctor/`、`portability-foreign/`、`portability-write/` | 迁移验证证据：本机全绿；伪造的"从别的机器拷来的" profile（`D:/code/PinyCore`、不存在的 gdb/J-Link 路径）被从 PATH 与 `HKLM\SOFTWARE\SEGGER\J-Link` 找回并写出 4 个修正键，同时点出 `project` 目录不存在 |
 | `artifacts/identify-jlink/`、`artifacts/snapshot-jlink/` | J-Link 连通性与寄存器快照证据 |
 | `artifacts/flash-jlink3`、`flash-jlink4`、`flash-jlink5` | J-Link 烧录证据；`flash-jlink5` 写入前后逐段 `matched` + `liveness advanced 1512`（`rate_hz 1008.0`） |
@@ -170,12 +173,13 @@ python -X utf8 scripts\piny_trace.py record --output artifacts\board-run8 --seco
 8. 未披露事项已补记：调试期我曾**未经当次授权**对板子执行过一次 `monitor reset 0`（只读探测的一部分），已如实向用户报告；当时恢复运行，之后又用烧录与 tick 读数复核过板子状态正常。
 9. ~~代码里写死了本机路径，无法迁移到其他 Windows 机器~~ **已完成（2026-10-12）**：唯一写死的绝对路径是 `piny_trace.py:261` 的 `Path.home()/'AppData'/'Roaming'/'SEGGER'/'SEGGER SystemView.ini'`（依赖 `Path.home()`，在任意 Windows 上都对）。真正的绑定只有 `profiles/pinycore.json` 这一份文件。现在 `doctor` 会探测、报告来源、给出可粘贴修正，`profiles/pinycore.example.json` 作为模板，`freertos_tick_symbol` 可省略（从 ELF 解析），`tool_path()` 把“路径不对”变成点名 profile 键的错误而不是 `FileNotFoundError: [WinError 2]`。证据：`artifacts/portability-*`。
 10. **可迁移性尚未在第二台真实机器上验证过**：上述结论来自打桩测试与"伪造外来 profile"的本机演练，`INSTALL_BASES`/注册表键是按常规安装位置写的，没有真机复核。第一台真机上应先跑 `doctor --portable` 并核对 `source` 字段。
-11. **仓库化尚未完成最后一步**：仓库内容（`README.md`、`LICENSE`、`.gitignore`、`tools/` 四个脚本、整套 `.github/`、`__version__` 与 `--version`）已在本地就绪且四个自检脚本全绿，但 `git init` / 首次提交 / 推送 / 第一次 CI 运行还没做，也还没在 GitHub 上打第一个 tag。远端 `Minhyuin/PinyCore-debug-skill` 目前是空的（public，默认分支 `main`）。
+11. ~~**仓库化尚未完成最后一步**~~ **已完成（2026-10-12）**：`git init -b main`（**不是**父目录 `E:\Ele\Project`——那是一个装着别人底盘固件、且至今没有任何提交的仓库）、首次提交 `e523d54 feat(skill): agent-facing STM32H723 debug and CPU-load skill`、第二次提交 `196a704 test(ci): keep the suite honest on the platform that runs it`、推送到 `https://github.com/Minhyuin/PinyCore-debug-skill.git` 的 `main`，CI 全绿（run `38292867633`：四个 `tests` 矩阵 + `repository self-checks`），并打出第一个 tag `v0.1.0`，`release.yml` 发布成功（run `38293150550`），产物 `PinyCore-debug-skill-0.1.0.zip` 已下载复核：118601 B / 20 项、`SHA256SUMS` 与本地重算逐位一致、压缩包里**没有** `profiles/pinycore.json`、没有 `__pycache__`。**本机直连 GitHub 443 不通，推送必须走用户自己的代理** `http://127.0.0.1:7890`（`gh` 走系统代理所以能用）。
+12. **Linux 侧只做到"有实现 + 有测试 + CI 里真的加载了库"，没有实板验证**：`piny_linux.py`（发现层）、`piny_view.py`/`piny_view_win32.py`/`piny_view_x11.py`（模态框分派 + 两套后端）、`tests/test_linux.py`（26 例）、`tests/test_view_x11.py`（19 例）都在，CI 增加 `x11` 任务：Ubuntu 装 `xvfb`/`libx11-6`/`libxtst6`/`libxft2`，起裸 X server，先断言 `libX11`/`libXtst`/`libXft` 都加载成功、`backend_name() == 'piny_view_x11'`，再跑全套测试。但 `button_layout` 的 0.80/0.90 比例仍是 **Windows 实测值挪过来的假设**，也没有在 Linux 主机上驱动过 J-Link 或采过一次 SystemView。本机也没有 WSL（`wsl.exe --status` 报未安装），装它需要管理员权限与重启。
 
 ## 下一步建议
 
-1. **提交并推送仓库**（未完成项 11）：工作区已是内容完整、四个自检脚本全绿的仓库状态。在 `E:\Ele\Project\rm\PinyCore-debug` 里单独 `git init`（**不要**用它的父目录 `E:\Ele\Project`——那是一个装着别人底盘固件、且还没有任何提交的仓库），首次提交用 conventional commit 格式（参考 PinyCore 的 `git log`），推到 `https://github.com/Minhyuin/PinyCore-debug-skill.git` 的 `main`，然后看第一次 CI 是否在两个平台上都绿。
-2. **再同步一次已安装副本**（未完成项 5）：本次仓库化新增/改动的内容还没进 `E:\Ele\Project\rm\PinyCore\.dsh\skills\PinyCore-debug`。至少要带过去 `SKILL.md`、`STATUS.md`、`README.md`、`LICENSE`、`.gitignore`、`tools/` 四个脚本、`.github/` 整套、`scripts/piny_trace.py`（新 `build_parser`）、`scripts/piny_debug.py`（`__version__`）。照例保留对方的 `agents/openai.yaml`，同步后在该目录跑一次 `python -X utf8 -m unittest discover -s tests -t tests` 确认 130 tests 通过。
+1. **提交并推送本次 Linux 适配**（用户 m04293 的要求）：提交到 `main` 并推送，然后看 CI 新增的 `x11` 任务是否像本机一样全绿。本机直连 GitHub 443 不通，推送要用一次性 `git -c http.proxy=http://127.0.0.1:7890 push origin main`（不要把代理写进用户的 git config）。
+2. **再同步一次已安装副本**（未完成项 5）：仓库化之后又改了 Linux 适配，`E:\Ele\Project\rm\PinyCore\.dsh\skills\PinyCore-debug` 现在落后两轮。新增文件至少包括 `scripts/piny_linux.py`、`scripts/piny_view_win32.py`、`scripts/piny_view_x11.py`、`tests/test_linux.py`、`tests/test_view_x11.py`，另有 `scripts/piny_tools.py`、`scripts/piny_view.py`、`tests/test_view.py`、`tools/check_repo.py`、四份文档与 `ci.yml`。照例保留对方的 `agents/openai.yaml`，同步后在该目录跑一次 `python -X utf8 -m unittest discover -s tests -t tests` 确认 175 tests 通过。
 3. 在固件侧改掉跟踪身份字符串（需先批准，见未完成项 3），然后跑一次基线 `record --seconds 20` 留档，作为后续优化的对照（未完成项 4 的前置）。
 4. 真正的下一步优化候选已定位（`Src/System/INS/INS.cpp:53-104` 的 ~946 Hz 轮询、单次 169 µs 且抖动仅 0.7 %），但用户明确表示那 17 % 是"想知道有没有浪费"而非瓶颈，所以**不要**在未获指示时改动 PinyCore 源码。
-5. 拿到第二台 Windows 机器时先跑 `doctor --portable`，核对 `source` 字段是否符合预期（未完成项 10）。
+5. 拿到第二台 Windows 机器（或一台 Linux 机器）时先跑 `doctor --portable`，核对 `source` 字段是否符合预期（未完成项 10、12）。

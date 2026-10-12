@@ -24,10 +24,12 @@ tests:
       - any-glob-to-any-file: ['tests/**']
 portability:
   - changed-files:
-      - any-glob-to-any-file: ['scripts/piny_tools.py', 'profiles/**', 'references/portability.md']
+      - any-glob-to-any-file: ['scripts/piny_tools.py', 'scripts/piny_linux.py',
+                               'profiles/**', 'references/portability.md']
 tracing:
   - changed-files:
-      - any-glob-to-any-file: ['scripts/piny_trace.py', 'scripts/piny_view.py']
+      - any-glob-to-any-file: ['scripts/piny_trace.py', 'scripts/piny_view.py',
+                               'scripts/piny_view_win32.py', 'scripts/piny_view_x11.py']
 registers:
   - changed-files:
       - any-glob-to-any-file: ['scripts/piny_debug.py']

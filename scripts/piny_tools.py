@@ -23,7 +23,13 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
+
+#: Sentinel for "the caller did not say which search space to use", so that the default can be
+#: computed FOR THE PLATFORM AT RUN TIME. A plain ``bases=INSTALL_BASES`` default cannot do
+#: that: it is evaluated once, at import, and would hand a Windows tuple to a Linux host.
+_DEFAULT = object()
 
 #: Extensions a Windows executable can carry. On other platforms ``shutil.which`` handles
 #: the executable bit and a bare name is right, so this is only consulted on Windows.
@@ -52,7 +58,7 @@ INSTALL_PATTERNS = {
 
 #: Directories searched with ``INSTALL_PATTERNS``, most specific first. ``%ProgramFiles%``
 #: style variables are expanded; unset variables drop out silently, which is what makes this
-#: work on a machine that has only some of them.
+#: work on a machine that has only some of them. Linux has its own list, in ``piny_linux.py``.
 INSTALL_BASES = (
     r'%ProgramFiles%',
     r'%ProgramFiles(x86)%',
@@ -64,6 +70,12 @@ INSTALL_BASES = (
     r'C:\Program Files',
     r'C:\Program Files (x86)',
 )
+
+#: Which module describes each platform's search space. The module is imported lazily, because
+#: a Windows-only import here would make the whole package unimportable on the machine it is
+#: supposed to migrate TO, and ``winreg`` is not the only such import (``ctypes.windll`` is
+#: another). An empty value means "this machine uses the vocabulary defined in this file".
+PLATFORM_INVENTORY = {'nt': '', 'posix': 'piny_linux'}
 
 #: Registry locations that record an install directory rather than a bare executable. Each
 #: entry is (tool key, hive, subkey, value names to try, relative executable path). The
@@ -96,6 +108,48 @@ JLINK_COMPANIONS = ('JLink.exe', 'JLinkRTTLogger.exe', 'JLinkGDBServer.exe')
 
 def _is_windows():
     return os.name == 'nt'
+
+
+def _is_linux():
+    """POSIX and not macOS: macOS has its own layouts and is deliberately not claimed here."""
+    return os.name == 'posix' and sys.platform.startswith('linux')
+
+
+def inventory(platform=None):
+    """The layout module for ``platform`` (default: this machine), or None for the built-ins.
+
+    Returning None -- rather than a module with the same names -- is the point: on Windows the
+    vocabulary in this file IS the platform's, and a caller can tell the two apart.
+    """
+    platform = os.name if platform is None else platform
+    if platform == 'nt':
+        return None
+    name = PLATFORM_INVENTORY.get(platform) or (PLATFORM_INVENTORY.get('posix')
+                                                if platform.startswith('linux') else '')
+    if not name:
+        return None
+    import importlib
+    return importlib.import_module(name)
+
+
+def default_bases(platform=None):
+    """The install directories to search when the caller does not name any."""
+    module = inventory(platform)
+    return tuple(module.INSTALL_BASES) if module is not None else INSTALL_BASES
+
+
+def path_names(key, platform=None):
+    """The names ``key`` is installed under on PATH, most preferred first."""
+    module = inventory(platform)
+    if module is not None:
+        return tuple(module.PATH_NAMES.get(key, ()))
+    return tuple(PATH_NAMES.get(key, ()))
+
+
+def companion_names(platform=None):
+    """Executables that live beside the J-Link GDB server on this platform."""
+    module = inventory(platform)
+    return tuple(module.JLINK_COMPANIONS) if module is not None else JLINK_COMPANIONS
 
 
 def _existing_file(candidate):
@@ -131,8 +185,19 @@ def search_path(name):
     return Path(hit) if hit else None
 
 
-def search_install_directories(key, bases=INSTALL_BASES):
-    """Conventional install directories, expanded and globbed. Returns (path, label) pairs."""
+def search_install_directories(key, bases=_DEFAULT):
+    """install-directory hits for ``key`` on THIS platform, as (path, label) pairs, best first.
+
+    On Linux the walk itself belongs to ``piny_linux.py``, because the names there are prefixes
+    rather than files: SEGGER's Linux builds append letters where Windows appends ``.exe``. The
+    Linux module is asked first and its result is returned unchanged, so there is exactly one
+    implementation per platform rather than a merged list that nobody can reason about.
+    """
+    if bases is _DEFAULT:
+        module = inventory()
+        if module is not None:
+            return module.search_install_directories(key)
+        bases = INSTALL_BASES
     patterns = INSTALL_PATTERNS.get(key, ())
     if not patterns:
         return []
@@ -227,15 +292,35 @@ def _deduplicate(found):
     return unique
 
 
-def find_tool(key, profile_value=None, bases=INSTALL_BASES, with_registry=True):
+def _delegate(key, profile_value, bases, with_registry):
+    """Ask the platform module, if this machine has one, to do the whole lookup.
+
+    Delegating the WHOLE lookup rather than only the directory walk keeps one platform's
+    preferences in one file: on Linux the order of PATH spellings and of name prefixes decides
+    which of two real J-Link builds is run, and splitting that decision across two modules is
+    how a machine ends up starting the GUI server it cannot drive.
+    """
+    module = inventory()
+    if module is None:
+        return None
+    return module.find_tool(key, profile_value, bases=None if bases is _DEFAULT else bases,
+                            with_registry=with_registry)
+
+
+def find_tool(key, profile_value=None, bases=_DEFAULT, with_registry=True):
     """Locate one tool and say which step answered.
 
     Returns ``{'key','path','source','exists','searched','found'}``. ``path`` is the profile's
     own value whenever that value is a real file -- an explicit configuration always wins, so
     discovery can never quietly redirect a working setup. ``found`` is the list of every
     candidate the later steps turned up, so a caller can show the alternatives rather than
-    hiding them.
+    hiding them. ``bases`` defaults to the platform's own list, resolved at call time.
     """
+    delegated = _delegate(key, profile_value, bases, with_registry)
+    if delegated is not None:
+        return delegated
+    if bases is _DEFAULT:
+        bases = INSTALL_BASES
     searched = ['profile', 'PATH', 'install-directories']
     if with_registry:
         searched.append('registry')
@@ -264,11 +349,12 @@ def find_tool(key, profile_value=None, bases=INSTALL_BASES, with_registry=True):
 
 
 #: Profile keys that name an executable this skill starts, and what each is for. The
-#: description is what turns a miss into an instruction instead of an OS error message.
+#: description is what turns a miss into an instruction instead of an OS error message, so it
+#: names the TOOL rather than one platform's spelling of its file name.
 TOOL_KEYS = {
     'gdb': 'the Arm GNU toolchain GDB (the MI client that talks to the debug transport)',
-    'jlink_gdb_server': "SEGGER's JLinkGDBServerCL.exe (the transport for a SEGGER probe)",
-    'systemview': "SEGGER's SystemView.exe (the CPU-load recorder and CSV exporter)",
+    'jlink_gdb_server': "SEGGER's J-Link GDB server CLI (the transport for a SEGGER probe)",
+    'systemview': "SEGGER's SystemView (the CPU-load recorder and CSV exporter)",
     'openocd': 'OpenOCD (only needed for a non-SEGGER probe)',
 }
 
@@ -279,13 +365,17 @@ REQUIRED_BY_PROBE = {
 }
 
 
-def discover(profile, bases=INSTALL_BASES, with_registry=True):
+def discover(profile, bases=_DEFAULT, with_registry=_DEFAULT):
     """Resolve every tool key in ``profile`` and report what is missing and what to do.
 
     Returns ``{'tools','resolved','missing','required','usable','summary'}``. ``resolved`` maps
     a profile key to the path that should actually be used, which lets the caller run from a
-    discovered path without the profile being rewritten first.
+    discovered path without the profile being rewritten first. Both ``bases`` and
+    ``with_registry`` default to the platform's own answer: a registry lookup on Linux is not
+    "disabled", it is meaningless, and saying so is the platform module's job.
     """
+    if with_registry is _DEFAULT:
+        with_registry = inventory() is None        # only Windows looks in a registry
     probe = profile.get('probe') or 'openocd'
     required = REQUIRED_BY_PROBE.get(probe, ())
     tools = {}
@@ -303,10 +393,14 @@ def discover(profile, bases=INSTALL_BASES, with_registry=True):
 
 
 def jlink_companions(server_path):
-    """``JLink.exe`` / ``JLinkRTTLogger.exe`` beside a resolved GDB server, with existence."""
+    """The J-Link CLIs that sit beside a resolved GDB server, with their existence.
+
+    Which names to look for is the platform's business: Windows has ``JLink.exe`` and
+    ``JLinkRTTLogger.exe``, Linux the same tools spelled ``JLinkExe`` and ``JLinkRTTLoggerExe``.
+    """
     base = Path(server_path).parent if server_path else None
     out = {}
-    for name in JLINK_COMPANIONS:
+    for name in companion_names():
         candidate = (base / name) if base else None
         out[name] = {'path': str(candidate) if candidate else None,
                      'exists': bool(candidate and candidate.is_file())}

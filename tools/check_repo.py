@@ -39,18 +39,27 @@ PACKAGE_FILES = (
     'LICENSE',
     'profiles/pinycore.example.json',
     'scripts/piny_debug.py',
+    'scripts/piny_linux.py',
     'scripts/piny_tools.py',
     'scripts/piny_trace.py',
     'scripts/piny_view.py',
+    'scripts/piny_view_win32.py',
+    'scripts/piny_view_x11.py',
     'tests/test_debug.py',
+    'tests/test_linux.py',
     'tests/test_tools.py',
     'tests/test_trace.py',
     'tests/test_view.py',
+    'tests/test_view_x11.py',
     'tools/check_repo.py',
     'tools/check_workflows.py',
     'tools/release_notes.py',
     'tools/smoke_doctor.py',
 )
+
+# Directories in which every `*.py` has to be declared above. A module that exists but is not in
+# PACKAGE_FILES is a module no document names, which is how the file maps went stale before.
+SHIPPED_DIRECTORIES = ('scripts', 'tests', 'tools')
 
 # Files that must NOT be published. `profiles/pinycore.json` names machine absolute paths and the
 # serial number of one physical probe; a clone is expected to start from the example instead.
@@ -98,8 +107,22 @@ def check_package_files(checks):
     missing = [name for name in PACKAGE_FILES if not (ROOT / name).is_file()]
     for name in missing:
         checks.fail('package files', 'declared in tools/check_repo.py but absent: ' + name)
-    if not missing:
-        checks.ok(f'{len(PACKAGE_FILES)} declared package files present')
+
+    # The whitelist only proves the files it names exist. This is the other direction: a module
+    # that was added and never declared would sail past a check that only reads the list, and that
+    # is exactly how a file map goes stale. Adding a module therefore means declaring it here,
+    # which in turn makes the file-map check below demand that a document names it.
+    undeclared = []
+    for directory in SHIPPED_DIRECTORIES:
+        for path in sorted((ROOT / directory).glob('*.py')):
+            name = f'{directory}/{path.name}'
+            if name not in PACKAGE_FILES:
+                undeclared.append(name)
+    for name in undeclared:
+        checks.fail('package files', f'{name} exists but is not declared in PACKAGE_FILES')
+
+    if not missing and not undeclared:
+        checks.ok(f'{len(PACKAGE_FILES)} declared package files present, none undeclared')
 
     # A file map that names a file which does not exist is worse than no file map, and one that
     # omits a file means a reader never learns it is there.

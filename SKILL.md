@@ -9,7 +9,7 @@ description: "为 PinyCore 的 STM32H723/J-Link 开发环境自动启动 GDB 读
 
 ## 范围与状态
 
-当前只针对 PinyCore / STM32H723 / Windows 验证；探针是接在板上的 SEGGER J-Link（设备 `STM32H723VG`，序列号 `602712375`）。架构分为项目配置、GDB/J-Link 执行器、SystemView 采集分析器；通过 `--profile` 扩展配置，不宣称已支持未测试探针。当前不需要 MCP 服务。
+当前实板验证只发生在 **PinyCore / STM32H723 / Windows**；探针是接在板上的 SEGGER J-Link（设备 `STM32H723VG`，序列号 `602712375`）。宿主脚本本身**同时支持 Windows 与 Linux**：工具发现按平台分派（`piny_tools.py` → `piny_linux.py`），许可证模态框也有两套后端（`piny_view_win32.py` / `piny_view_x11.py`），但 Linux 侧还没有在真机上驱动过这块探针、也没采过一次跟踪。架构分为项目配置、GDB/J-Link 执行器、SystemView 采集分析器；通过 `--profile` 扩展配置，不宣称已支持未测试探针。当前不需要 MCP 服务。
 
 先读 [项目与验证状态](references/pinycore.md)。2026-10-12 实板复测：
 
@@ -43,7 +43,7 @@ python $tool doctor
 python $tool doctor --portable
 ```
 
-本机工具的路径全部来自 profile；换一台机器时从 `profiles/pinycore.example.json` 起一份新配置，详见下面的「迁移到另一台 Windows 机器」。
+本机工具的路径全部来自 profile；换一台机器时从 `profiles/pinycore.example.json` 起一份新配置，详见下面的「迁移到另一台机器（Windows / Linux）」。
 
 源码工作区在 `E:\Ele\Project\rm\PinyCore-debug`（同一套脚本，另有 `SKILL.md`、`STATUS.md`、`tests/` 与 `artifacts/`）。改动后要同步到上面这个已安装目录才会生效。
 
@@ -162,7 +162,7 @@ python $trace compare 'E:\path\before\summary.json' 'E:\path\after\summary.json'
 
 比较输出百分点变化；只有有效记录允许比较。另核对输入负载、预热、运行时长、构建优化级别、CPU 时钟、探针速率和插桩一致性。单次差异不等于已证明优化有效。
 
-## 迁移到另一台 Windows 机器
+## 迁移到另一台机器（Windows / Linux）
 
 整套脚本里**没有一处写死本机路径**：所有可执行文件与项目路径都从 `--profile` 指向的 JSON 读取。换机器的全部工作就是让那份 JSON 在那边成立。
 
@@ -175,7 +175,8 @@ Copy-Item profiles\pinycore.example.json profiles\my-rig.json
 python $tool doctor --profile profiles\my-rig.json --write-profile profiles\my-rig.json
 ```
 
-- `doctor` 按 **profile 值 → PATH → 常见安装目录 → SEGGER/注册表** 的顺序查每个工具，并**报出是哪一步命中的**（`source`）。profile 里已经指向真实文件的路径永远优先，探测**不会**悄悄改掉一个能用的配置。
+- `doctor` 按 **profile 值 → PATH → 常见安装目录 → SEGGER/注册表（仅 Windows）** 的顺序查每个工具，并**报出是哪一步命中的**（`source`）。profile 里已经指向真实文件的路径永远优先，探测**不会**悄悄改掉一个能用的配置。
+- 平台差异集中在两个地方，命令与报告结构在两平台上一致：工具发现（Linux 走 `piny_linux.py`：`/opt/SEGGER/JLink*`、`/usr/bin`、`~/.local/bin`，并认识 SEGGER 在 Linux 上的名字 `JLinkGDBServerCLExe`）与许可证模态框后端（`piny_view_win32.py` / `piny_view_x11.py`）。
 - 查不到时不再抛 `FileNotFoundError: [WinError 2] 系统找不到指定的文件`（那种报错既不说哪个键、也不说哪个工具），而是：`Profile key "gdb" points at ... which is not a file on this machine. Set it to the right path in <profile>. Found one here instead: ... -- run "doctor" to see the full list.`
 - `doctor` 同时检查 `project` 目录与其中的 ELF，并把每个问题写成一句可执行的话（`problems[]`）。`usable` 只在必需工具与项目目录都在时为 true。
 - `--portable` 把 profile 的键分成两类，**这个区分是迁移时最容易出错的地方**：
@@ -185,16 +186,19 @@ python $tool doctor --profile profiles\my-rig.json --write-profile profiles\my-r
 - `freertos_tick_symbol` 现在**可以不写**：缺省时用 `arm-none-eabi-nm` 从 profile 指向的 ELF 里解析 `xTickCount`，因此重新构建后地址变化不再需要手工维护。写了则以 profile 为准（用于故意监视另一个镜像）。解析不到时 liveness 报 `checked:false`，即"未验证"，不会假装 running。
 - 严格模式：`load_profile(..., discover_tools=False)`（或直接不给 `_tools`）只用 profile 原值，便于复现问题或在受控机器上定位。
 - `doctor` 是**唯一会写文件**的命令，写的前提是你点名 `--write-profile`；但它和其它命令一样会在自己的工作目录下建一个本次运行的 `artifacts/<时间戳>/` 目录（即使什么都没做）。如果你把技能装在被版本管理的目录里，记得忽略该目录。
+- **Linux 上尚未实测的部分**：`doctor` 的 Linux 发现逻辑与 X11 后端有单元测试，CI 还会在 Xvfb 里断言 `libX11`/`libXtst`/`libXft` 真的加载、选中的确实是 X11 后端；但 X11 的按钮位置比例（0.80/0.90）是从 Windows 实测值挪过来的假设，且没有在 Linux 主机上驱动过探针或采过跟踪。第一次在 Linux 上跑，先 `doctor --portable` 核对 `source`，再 `identify`。
 
 ## 授权对话框的实测行为（不要退回旧做法）
 
-`scripts/piny_view.py` 负责应答模态框，它的规则来自实测，不是猜的：
+`scripts/piny_view.py` 是分派层，负责应答模态框；平台后端是 `piny_view_win32.py`（ctypes + user32）与 `piny_view_x11.py`（XTest，其次 `XSendEvent`）。下面这些规则来自实测，不是猜的：
 
 - **必须投递鼠标消息，不能合成鼠标移动。** 控制台可能处于锁定状态：全屏截图会拿到锁屏壁纸，对话框上每一点的顶层窗口都是 explorer 的 `LockScreenBackstopFrame`，`SetCursorPos`+`mouse_event` 只有效于无人观看的桌面。`PostMessageW` 直接投给指定窗口，不需要输入桌面，而 Qt 会照常做命中测试：点对话框正文或标题栏什么都不发生，点按钮行才会动作。
 - **三个按钮从左到右是 License Manager、Accept、Decline。** 按客户区算出来是 `Decline` 贴右边、`Accept` 在中间、`License Manager` 在左边（9 pt Segoe UI 文字宽度 + 14 px 内边距、间隔 10 px、距右/下 12 px、高 26 px）。两轮实测：客户区 900×441 时 `(859,418)` 会 Decline 并 rc=1、`(793,418)` 无反应、`(708,418)` 打开主窗口；客户区 720×352 时 `(613,327)` 被接受、控制服务器 2 s 后应答。**按右下角分数位置点击会点到 Decline**，这正是早期每次启动都失败的原因。
 - **投递回车（Return）是陷阱**：对话框会消失，看起来像成功，但 SystemView 随即 rc=1 退出——回车走的是 Decline 分支。`post_enter()` 只作为记录在案的陷阱保留，不要用它应答模态框。
 - **“对话框消失”不能单独作为成功证据**：`accept_license` 只有在进程仍存活（`GetExitCodeProcess == STILL_ACTIVE`）时才把消失当接受，否则报 `the license dialog vanished but SystemView exited; the modal was DECLINED, not accepted (posting Return does this)`。
 - UI Automation 在本机不是出路：该对话框是 `QWidget`，没有子窗口，也没有任何可访问子元素（`FindFirst(Descendants, Name='Accept')` 找不到），`comtypes` 未安装。
+- 上面三条（投递鼠标消息、三按钮几何、回车是 Decline）都是 **Windows/user32 上测得的行为**。X11 后端没有 `PostMessageW`，所以走另一条阶梯：`XTestFakeMotionEvent`+`XTestFakeButtonEvent`（等价于 `xdotool` 的做法，不需要窗口管理器配合）→ 失败则 `XSendEvent` 直接投给对话框窗口（Qt 通常忽略这类非可信事件）→ 都不可用就**如实报失败**。X11 侧的 `button_layout` 复用了 Windows 测出的 0.80/0.90 比例，属于**假设**，所以 `click_accept` 还有"点按钮带内子窗口中心"的兜底，报告里用 `where: fraction|child` 说明是哪一步成功的。
+- 无 `DISPLAY` 的会话（CI runner、容器、纯 ssh）不会崩：`available()` 返回 false，`accept_license` 报 `no dialog backend for this session`，让调用者明确知道要人工应答，而不是假装成功。
 
 ## 仓库、版本与本地自检
 
@@ -207,13 +211,14 @@ python -X utf8 tools\smoke_doctor.py              # 只用示例 profile 能否�
 ```
 
 - **`profiles/pinycore.json` 不入库**（`.gitignore` 里点名忽略）：它写着本机绝对路径、这块探针的序列号和本镜像的符号地址，属于这台机器。入库的只有 `pinycore.example.json` 模板；发布流水线还会在打包时再删一次，双保险。
-- `tools\check_repo.py` 是防文档腐烂的闸门，它检查的不是"文件在不在"这一件事：`PACKAGE_FILES` 里声明的文件都被 `STATUS.md`/`README.md` 点到名；文档里写的子命令确实属于它提到的那个脚本（`doctor`/`capture` 只在 `piny_debug.py`，`piny_trace.py` 只有 `analyze`/`compare`/`record`）；示例 profile 合法且不含真实路径；`profiles/pinycore.json` 没被跟踪；**四份文档里的测试基线数字与 `unittest discover` 实际跑出来的一致**（所以改完测试要同步 `SKILL.md`、`STATUS.md`、`README.md`、`references/pinycore.md`）；`--tag` 与 `scripts/piny_debug.py` 的 `__version__` 一致。
+- `tools\check_repo.py` 是防文档腐烂的闸门，它检查的不是"文件在不在"这一件事：`PACKAGE_FILES` 里声明的文件都被 `STATUS.md`/`README.md` 点到名，且 `scripts`/`tests`/`tools` 下**每个 `*.py` 都必须被声明过**（新模块漏声明就直接失败——文件地图就是这样悄悄过期的）；文档里写的子命令确实属于它提到的那个脚本（`doctor`/`capture` 只在 `piny_debug.py`，`piny_trace.py` 只有 `analyze`/`compare`/`record`）；示例 profile 合法且不含真实路径；`profiles/pinycore.json` 没被跟踪；**四份文档里的测试基线数字与 `unittest discover` 实际跑出来的一致**（所以改完测试要同步 `SKILL.md`、`STATUS.md`、`README.md`、`references/pinycore.md`）；`--tag` 与 `scripts/piny_debug.py` 的 `__version__` 一致。
 - 版本只有一处真源：`scripts/piny_debug.py` 的 `__version__`（`piny_trace.py` 从它导入）。发版走 tag：`.github/workflows/release.yml` 在 `v*.*.*` tag 上先校验 tag 与 `__version__` 一致、单测通过，再打包源码 zip + `SHA256SUMS` 发 Release；**tag 与 `__version__` 必须在同一个提交里改**。
-- CI 的 `tests` 任务是 Ubuntu + Windows × Python 3.10/3.13 矩阵，`repo-checks` 任务跑上面三个自检脚本——**都不需要探针、板子和 SEGGER 安装**。这也是一条设计约束：任何新检查都不要引入这些依赖，也不要引入 pip 依赖（本包只用标准库）。
+- CI 有三个 job：`tests`（Ubuntu + Windows × Python 3.10/3.13）、`x11`（Ubuntu + Xvfb，断言 `libX11`/`libXtst`/`libXft` 加载成功且后端确实是 `piny_view_x11`）、`repo-checks`（上面三个自检脚本）——**都不需要探针、板子和 SEGGER 安装**。这也是一条设计约束：任何新检查都不要引入这些依赖，也不要引入 pip 依赖（本包只用标准库）。
+- 平台条件是**按能力判断，不是按 `sys.platform`**：`test_view.py` 的模态框用例在 `piny_view.available()` 为真时运行（Windows 有 user32、Linux 有 X display 都算），只有两者都没有时才跳过。这样同一个数字（175 tests, 2 skipped）在四个 CI job 里都成立，跳过的是"这台机器上根本没有的东西"，而不是藏起跑不过的断言。
 
 ## 验收和汇报
 
-1. 跑 `tests/` 中的单元测试（在工作区源码包内），再做本次涉及的实际路径检查。当前基线：`python -X utf8 -m unittest discover -s tests -t tests` → 130 tests, OK (skipped=1)。`tests/test_tools.py` 覆盖可迁移性：路径优先级、PATH/安装目录/注册表探测、路径去重、缺失工具的报错文案、`--write-profile` 的合并与"不点名就不写"、machine/target 分类。这些用例全部在临时目录或打桩下运行，**不依赖本机装了什么**。
+1. 跑 `tests/` 中的单元测试（在工作区源码包内），再做本次涉及的实际路径检查。当前基线：`python -X utf8 -m unittest discover -s tests -t tests` → 175 tests, OK (skipped=2)。`tests/test_tools.py` 与 `tests/test_linux.py` 覆盖可迁移性：路径优先级、PATH/安装目录/注册表探测、路径去重、缺失工具的报错文案、`--write-profile` 的合并与"不点名就不写"、machine/target 分类，以及 Linux 侧的安装目录/可执行文件名/版本号目录优先级/平台分派；`tests/test_view_x11.py` 覆盖 X11 后端的几何、按钮识别与降级阶梯。这些用例全部在临时目录或打桩下运行，**不依赖本机装了什么**。
 2. 存在文件、非空数据、原生导出成功、目标实际状态分别核验。MCP 如未来加入，还需握手/工具枚举；不以注册成功代替执行验证。
 3. 汇报：实际读取/采集结果、配置/固件标识、数据来源、目标恢复状态、失败/覆盖限制、日志路径。不要把官方样例负载标为 PinyCore 实测。
 4. 扩展从 `profiles/*.json` 和执行器接口入手，避免为第二个项目复制一套逻辑。新增探针或 RTOS 必须有独立验证，之后再考虑薄 MCP 封装。

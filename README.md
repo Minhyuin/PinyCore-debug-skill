@@ -3,7 +3,7 @@
 [![CI](https://github.com/Minhyuin/PinyCore-debug-skill/actions/workflows/ci.yml/badge.svg)](https://github.com/Minhyuin/PinyCore-debug-skill/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Minhyuin/PinyCore-debug-skill?include_prereleases&sort=semver)](https://github.com/Minhyuin/PinyCore-debug-skill/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078d4)
+![Platform: Windows and Linux](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-0078d4)
 ![Python: 3.10+](https://img.shields.io/badge/python-3.10%2B-3776ab)
 
 一个给编码 agent 用的调试技能包：在 **[PinyCore](https://github.com/SCNU-PIONEER/PinyCore)**（STM32H723 + FreeRTOS）的实板上自动启动 GDB 读取寄存器与符号变量，并通过 SEGGER SystemView 采集 CPU 负载，导出可比较的性能报告。
@@ -29,7 +29,7 @@ agent 做嵌入式优化时最难的不是改代码，而是**拿到可信的反
 
 ## 快速开始
 
-需要 Windows + Python 3.10+（主机脚本只用标准库）、[Arm GNU Toolchain](https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads)、[SEGGER J-Link](https://www.segger.com/downloads/jlink/) 与 [SystemView](https://www.segger.com/downloads/systemview/)。
+需要 **Windows 或 Linux** + Python 3.10+（主机脚本只用标准库）、[Arm GNU Toolchain](https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads)、[SEGGER J-Link](https://www.segger.com/downloads/jlink/) 与 [SystemView](https://www.segger.com/downloads/systemview/)。
 
 ```powershell
 git clone https://github.com/Minhyuin/PinyCore-debug-skill.git
@@ -49,6 +49,8 @@ python -X utf8 scripts\piny_debug.py doctor --write-profile profiles\pinycore.js
 python -X utf8 scripts\piny_debug.py identify
 python -X utf8 scripts\piny_debug.py --output artifacts\regs registers --allow-halt --symbol SystemCoreClock
 ```
+
+Linux 上把反斜杠换成斜杠、`Copy-Item` 换成 `cp` 即可；`doctor --portable` 会去 `/opt/SEGGER/JLink*`、`/usr/bin`、`~/.local/bin` 等位置找工具，并识别 SEGGER 在 Linux 上的可执行文件名（`JLinkGDBServerCLExe`）。许可证模态框在 Linux 上走 X11 后端（XTest，其次 `XSendEvent`），需要 `libX11`/`libXtst`/`libXft`；无 `DISPLAY` 时会明确报告"须人工应答"而不会假装成功。
 
 采集 SystemView：
 
@@ -71,13 +73,14 @@ python -X utf8 scripts\piny_trace.py compare --before artifacts\baseline --after
 
 ## 可迁移性
 
-迁移到另一台 Windows 机器：**[references/portability.md](references/portability.md)**。
+迁移到另一台 **Windows 或 Linux** 机器：**[references/portability.md](references/portability.md)**。
 
-- 工具按 **profile 值 → PATH → 常见安装目录 → SEGGER/注册表** 四级解析，每个结果都报出是哪一步命中的（`source`）。profile 里已指向真实文件的路径**永远优先**，探测不会悄悄改掉一个能用的配置。
+- 工具按 **profile 值 → PATH → 常见安装目录 → SEGGER/注册表（仅 Windows）** 解析，每个结果都报出是哪一步命中的（`source`）。profile 里已指向真实文件的路径**永远优先**，探测不会悄悄改掉一个能用的配置。
+- 平台差异集中在两个模块里：`piny_linux.py`（Linux 安装目录与 SEGGER 的 Linux 可执行文件名）、`piny_view_win32.py` / `piny_view_x11.py`（许可证模态框的两套后端）。上层 `piny_tools.py` / `piny_view.py` 只做分派，命令与报告结构在两个平台上一致。
 - 路径写错时给出的不再是 `FileNotFoundError: [WinError 2]`，而是点名 profile 键、说明该键用途、并指出本机哪里有可用替代。
 - profile 键分成两类：`machine` 键（本机路径，可以抄错也能被重新定位）与 `target` 键（板子/探针属性，**抄到另一套硬件上正是"看起来正常的配置给出错误数字"的来源**）。
 - `jlink_serial` 缺失时只报告、绝不猜；`freertos_tick_symbol` 可以省略，会从 ELF 自动解析。
-- **诚实的边界**：以上结论来自打桩测试与"伪造外来 profile"的本机演练，**尚未在第二台真实机器上验证**。到新机器先跑 `doctor --portable` 并核对 `source` 字段。
+- **诚实的边界**：工具探测的两套搜索逻辑都有单元测试覆盖（`test_tools.py` / `test_linux.py`），X11 后端在 CI 里用 Xvfb 真实加载 `libX11`/`libXtst` 跑通，但**尚未在第二台真实机器上验证过真机安装**，也还没在 Linux 实板上采过一次。到新机器先跑 `doctor --portable` 并核对 `source` 字段。
 
 ## 仓库说明
 
@@ -92,11 +95,15 @@ profiles/
 scripts/
   piny_debug.py           探针侧：doctor / license-check / identify / registers / flash / capture
   piny_trace.py           跟踪侧：analyze / compare / record
-  piny_tools.py           工具探测层，只用标准库
-  piny_view.py            模态框应答（ctypes + user32，无第三方依赖）
-tests/                    130 个用例，全部在临时目录或打桩下运行，不依赖本机装了什么：
+  piny_tools.py           工具探测层（分派到平台模块），只用标准库
+  piny_linux.py           Linux 安装目录与 SEGGER 的 Linux 可执行文件名
+  piny_view.py            模态框应答的分派层：平台无关的轮询/武装/重试循环
+  piny_view_win32.py      Win32 后端（ctypes + user32，无第三方依赖）
+  piny_view_x11.py        X11 后端（XTest，其次 XSendEvent）
+tests/                    175 个用例，全部在临时目录或打桩下运行，不依赖本机装了什么：
                           test_debug.py（探针、烧录、liveness）、test_tools.py（可迁移性与探测）、
-                          test_trace.py（质量门、导出校验）、test_view.py（模态框应答布局）
+                          test_linux.py（Linux 发现层）、test_trace.py（质量门、导出校验）、
+                          test_view.py（模态框应答流程）、test_view_x11.py（X11 后端的几何与降级）
 tools/                    仓库自检与发布辅助，见下面「本地自检」一节：
                           check_repo.py、check_workflows.py、release_notes.py、smoke_doctor.py
 references/               pinycore.md（项目事实）、portability.md（迁移指南）
@@ -112,7 +119,7 @@ agents/openai.yaml        agent 清单
 
 | 工作流 | 触发 | 做什么 |
 |---|---|---|
-| `ci.yml` | PR、推送到 `main`/`master`、手动 | `tests` 任务：Ubuntu + Windows × Python 3.10/3.13 跑全部单测与两个 `--version`；`repo-checks` 任务跑下面那四个自检脚本（不需要探针、板子和 SEGGER） |
+| `ci.yml` | PR、推送到 `main`/`master`、手动 | `tests` 任务：Ubuntu + Windows × Python 3.10/3.13 跑全部单测与两个 `--version`；`x11` 任务：Ubuntu 上装 `xvfb`/`libx11`/`libXtst`/`libXft`，起一个裸 X server，断言选中的后端确实是 `piny_view_x11` 而不是被静默跳过；`repo-checks` 任务跑下面那四个自检脚本。三者都不需要探针、板子和 SEGGER |
 | `release.yml` | 推送 tag `v*.*.*`、手动 | 先校验 tag 与脚本里的 `__version__` 一致、单测通过，再打包源码 zip + `SHA256SUMS` 发 GitHub Release |
 | `labeler.yml` | PR | 按分支名与改动文件打 `bug`/`enhancement`/`documentation`/`portability`/`tracing`/`registers` 等标签 |
 
@@ -120,7 +127,9 @@ agents/openai.yaml        agent 清单
 
 CI 用 `python -X utf8 -m unittest discover -s tests -t tests`，因为本项目不依赖 `pytest`——**这个仓库里的每个脚本都只用标准库**，CI 里没有任何 pip 安装步骤。
 
-两个平台上跑的用例数略有差别，这是有意的：Windows 上 130 个全跑，Ubuntu 上跳过 8 个 Windows 专属用例——模态框应答（`piny_view.py` 在非 Windows 上直接返回"须人工应答"）与 `%VAR%` 形式的安装目录展开（`os.path.expandvars` 在 POSIX 上不认这种写法）。跳过的正是"这条平台根本不执行的代码路径"，**不是**把跑不过的断言藏起来：这两个类在 Windows 上照常执行并通过。
+测试数在两个平台上因此完全一致：**175 个用例，跳过 2 个**。跳过的两个都是"这台机器上根本不存在的东西"，而不是藏起跑不过的断言：`%VAR%` 形式的安装目录展开（那是 Windows 专属词表，`os.path.expandvars` 在 POSIX 上不认这种写法），以及在既没有 user32 也没有 X display 的会话里跑模态框流程。X11 那一侧不是靠"跳过就算过"来交差的：`ci.yml` 的 `x11` 任务会先断言 `libX11`/`libXtst`/`libXft` 都加载成功、后端确实是 X11 后端，才让它跑测试。
+
+**尚未实测的部分要说清楚**：X11 后端在 CI 上验证的是"能连上裸 X server、几何计算与降级路径正确"，`button_layout` 用的 0.80/0.90 两个比例仍是 Windows 上的实测值，在 Linux 上属于假设——真正的 Linux 实板采集还没跑过。
 
 ### 本地自检
 
@@ -134,11 +143,12 @@ python -X utf8 tools\smoke_doctor.py        # 只用模板 profile 能否走完�
 python -X utf8 tools\release_notes.py v0.1.0      # 按 conventional commit 生成发布说明
 ```
 
-`check_repo.py` 是防文档腐烂的闸门，它实际验证的是：`PACKAGE_FILES` 里声明的文件都存在且都在 `STATUS.md`/`README.md` 里被点到名；每个文档里写的子命令确实属于它提到的那个脚本；示例 profile 合法且全是占位符；`profiles/pinycore.json` 没有被 git 跟踪；四份文档里的测试基线数字与 `unittest discover` 实际跑出来的一致；`--tag` 与 `__version__` 一致。
+`check_repo.py` 是防文档腐烂的闸门，它实际验证的是：`PACKAGE_FILES` 里声明的文件都存在、`scripts`/`tests`/`tools` 下每个 `*.py` 都被声明过（漏声明的模块会让文件地图悄悄过期），且都在 `STATUS.md`/`README.md` 里被点到名；每个文档里写的子命令确实属于它提到的那个脚本；示例 profile 合法且全是占位符；`profiles/pinycore.json` 没有被 git 跟踪；四份文档里的测试基线数字与 `unittest discover` 实际跑出来的一致；`--tag` 与 `__version__` 一致。
 
 ## 范围与边界
 
-- 仅针对 **PinyCore / STM32H723 / Windows + SEGGER J-Link** 验证过；不是通用 STM32 烧录工具，也不是 ESP32 开发技能。
+- 仅在 **Windows 与 Linux** 上实现；实板验证到目前为止只发生在 **PinyCore / STM32H723 / Windows + SEGGER J-Link** 这一套上。不是通用 STM32 烧录工具，也不是 ESP32 开发技能。
+- Linux 侧的实板采集**尚未跑过**：工具发现与 X11 后端有测试与 CI 覆盖，但那不是"在 Linux 上量过一次"。
 - J-Link 探针下 OpenOCD 路径不可用（SEGGER 内核驱动独占，OpenOCD 报 `LIBUSB_ERROR_NOT_FOUND`）。
 - `identify`/`registers` 的连接会短暂停下实时任务，进而影响 PWM/CAN 控制——`flash` 与 `registers` 都需要显式授权参数。
 - 不改 HAL 与 `ThirdParty/Lib`；不终止使用者已有的 GDB/J-Link/IDE/SystemView 进程；不为了让测试通过而截断 >100 % 的 CPU 负载。
@@ -146,12 +156,14 @@ python -X utf8 tools\release_notes.py v0.1.0      # 按 conventional commit 生�
 
 ## Scope and limits
 
-Verified only against PinyCore on an STM32H723 with a SEGGER J-Link on Windows. The host scripts are
-standard-library-only Python 3.10+. `DHCSR` is not a liveness witness on this probe (a core running
-at ~1009 Hz FreeRTOS tick reported a frozen halted state); the firmware's own `xTickCount` is the
-only trusted witness, and RTT drain rate is a measured per-rig value that must not be lowered to
-make a capture pass. Portability beyond this machine is implemented and unit-tested but has not been
-verified on a second physical machine.
+Verified against PinyCore on an STM32H723 with a SEGGER J-Link on Windows. The host scripts are
+standard-library-only Python 3.10+ and run on Windows and Linux; the Linux half (tool discovery in
+`piny_linux.py`, the X11 licence-dialog backend in `piny_view_x11.py`) is unit-tested and exercised
+against a real Xvfb in CI, but no Linux host has driven this probe or captured a trace yet. `DHCSR` is
+not a liveness witness on this probe (a core running at ~1009 Hz FreeRTOS tick reported a frozen
+halted state); the firmware's own `xTickCount` is the only trusted witness, and RTT drain rate is a
+measured per-rig value that must not be lowered to make a capture pass. Portability to a second
+physical machine is implemented and unit-tested but has not been verified on one.
 
 ## License
 
