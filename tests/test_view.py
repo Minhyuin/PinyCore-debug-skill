@@ -55,6 +55,10 @@ class _FakeView:
         case.addCleanup(restore)
 
 
+@unittest.skipUnless(sys.platform == 'win32',
+                     'answering the licence dialog is Windows-only: piny_view.py declares that '
+                     'boundary by returning "not Windows: license dialog must be answered '
+                     'manually", so these assertions are about code no other platform reaches')
 class LicenseDialogTests(unittest.TestCase):
     def test_absent_dialog_is_not_an_error(self):
         fake = _FakeView(dialog_calls=0)

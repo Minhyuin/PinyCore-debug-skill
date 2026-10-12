@@ -213,7 +213,31 @@ def check_example_profile(checks):
         checks.fail('example profile', 'strict mode discovered tools; it must use the file as written')
 
 
+def own_git_root():
+    """The repository root, but only when it is this directory.
+
+    This package is also installed inside other projects (e.g. `<project>/.dsh/skills/`), and there
+    the enclosing repository is somebody else's. Reading its index to answer questions about the
+    skill would be both wrong and alarming -- the local profile is *expected* to be untracked here
+    and tracked there -- so the git-backed checks stand down instead of guessing.
+    """
+    try:
+        proc = subprocess.run(['git', 'rev-parse', '--show-toplevel'], cwd=ROOT, capture_output=True,
+                              text=True, errors='replace', timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return Path(proc.stdout.strip()).resolve() == ROOT.resolve()
+    except OSError:
+        return False
+
+
 def check_no_leaked_configuration(checks):
+    if not own_git_root():
+        checks.ok('leaked-configuration check skipped: this is not a checkout of this repository')
+        return
     try:
         tracked = subprocess.run(['git', 'ls-files'], cwd=ROOT, capture_output=True, text=True,
                                  timeout=30)
@@ -282,10 +306,13 @@ def check_line_endings(checks):
     actually in the index rather than what one editor happened to leave in the working tree, and
     `w/crlf` alone is not a failure -- that is just how the file sits on this disk.
     """
+    if not own_git_root():
+        checks.ok('line-endings check skipped: this is not a checkout of this repository')
+        return
     proc = subprocess.run(['git', 'ls-files', '--eol'], cwd=ROOT, capture_output=True, text=True,
                           errors='replace')
     if proc.returncode != 0:
-        checks.ok('line endings skipped: not a git checkout')
+        checks.fail('line endings', 'git ls-files --eol failed: ' + proc.stderr.strip())
         return
     offenders = []
     for line in proc.stdout.splitlines():

@@ -94,7 +94,7 @@ scripts/
   piny_trace.py           跟踪侧：analyze / compare / record
   piny_tools.py           工具探测层，只用标准库
   piny_view.py            模态框应答（ctypes + user32，无第三方依赖）
-tests/                    129 个用例，全部在临时目录或打桩下运行，不依赖本机装了什么：
+tests/                    130 个用例，全部在临时目录或打桩下运行，不依赖本机装了什么：
                           test_debug.py（探针、烧录、liveness）、test_tools.py（可迁移性与探测）、
                           test_trace.py（质量门、导出校验）、test_view.py（模态框应答布局）
 tools/                    仓库自检与发布辅助，见下面「本地自检」一节：
@@ -119,6 +119,8 @@ agents/openai.yaml        agent 清单
 `.github/release.yml` 不是工作流：它定义 GitHub 自动生成 release notes 时的分类（与 PinyCore 的写法同名同义）。PinyCore 的 `cd.yml`、`request.yml` 这里没有对应物——没有固件要编译，也没有要强制填写的 PR 清单。
 
 CI 用 `python -X utf8 -m unittest discover -s tests -t tests`，因为本项目不依赖 `pytest`——**这个仓库里的每个脚本都只用标准库**，CI 里没有任何 pip 安装步骤。
+
+两个平台上跑的用例数略有差别，这是有意的：Windows 上 130 个全跑，Ubuntu 上跳过 8 个 Windows 专属用例——模态框应答（`piny_view.py` 在非 Windows 上直接返回"须人工应答"）与 `%VAR%` 形式的安装目录展开（`os.path.expandvars` 在 POSIX 上不认这种写法）。跳过的正是"这条平台根本不执行的代码路径"，**不是**把跑不过的断言藏起来：这两个类在 Windows 上照常执行并通过。
 
 ### 本地自检
 

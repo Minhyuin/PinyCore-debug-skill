@@ -213,7 +213,7 @@ python -X utf8 tools\smoke_doctor.py              # 只用示例 profile 能否�
 
 ## 验收和汇报
 
-1. 跑 `tests/` 中的单元测试（在工作区源码包内），再做本次涉及的实际路径检查。当前基线：`python -X utf8 -m unittest discover -s tests -t tests` → 129 tests, OK (skipped=1)。`tests/test_tools.py` 覆盖可迁移性：路径优先级、PATH/安装目录/注册表探测、路径去重、缺失工具的报错文案、`--write-profile` 的合并与"不点名就不写"、machine/target 分类。这些用例全部在临时目录或打桩下运行，**不依赖本机装了什么**。
+1. 跑 `tests/` 中的单元测试（在工作区源码包内），再做本次涉及的实际路径检查。当前基线：`python -X utf8 -m unittest discover -s tests -t tests` → 130 tests, OK (skipped=1)。`tests/test_tools.py` 覆盖可迁移性：路径优先级、PATH/安装目录/注册表探测、路径去重、缺失工具的报错文案、`--write-profile` 的合并与"不点名就不写"、machine/target 分类。这些用例全部在临时目录或打桩下运行，**不依赖本机装了什么**。
 2. 存在文件、非空数据、原生导出成功、目标实际状态分别核验。MCP 如未来加入，还需握手/工具枚举；不以注册成功代替执行验证。
 3. 汇报：实际读取/采集结果、配置/固件标识、数据来源、目标恢复状态、失败/覆盖限制、日志路径。不要把官方样例负载标为 PinyCore 实测。
 4. 扩展从 `profiles/*.json` 和执行器接口入手，避免为第二个项目复制一套逻辑。新增探针或 RTOS 必须有独立验证，之后再考虑薄 MCP 封装。

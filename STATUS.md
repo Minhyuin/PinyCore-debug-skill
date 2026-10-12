@@ -148,7 +148,7 @@ python -X utf8 scripts\piny_trace.py record --output artifacts\board-run8 --seco
 | `profiles/pinycore.example.json` | 新机器用的模板：占位路径 + 每个键的用途注释，`doctor --portable` 会指出要改哪几个 |
 | `references/pinycore.md` | PinyCore 项目工具链与验证事实 |
 | `references/portability.md` | 迁移到另一台 Windows 机器的完整说明：发现顺序、机器键 vs 目标键、速率是测量值不是偏好、serial 不猜、错误信息、严格模式、已验证/未验证边界 |
-| `tests/` | `test_debug.py`、`test_trace.py`、`test_view.py`、`test_tools.py`；基线 `python -X utf8 -m unittest discover -s tests -t tests` → **129 tests, OK (skipped=1)** |
+| `tests/` | `test_debug.py`、`test_trace.py`、`test_view.py`、`test_tools.py`；基线 `python -X utf8 -m unittest discover -s tests -t tests` → **130 tests, OK (skipped=1)** |
 | `artifacts/portability-doctor/`、`portability-foreign/`、`portability-write/` | 迁移验证证据：本机全绿；伪造的"从别的机器拷来的" profile（`D:/code/PinyCore`、不存在的 gdb/J-Link 路径）被从 PATH 与 `HKLM\SOFTWARE\SEGGER\J-Link` 找回并写出 4 个修正键，同时点出 `project` 目录不存在 |
 | `artifacts/identify-jlink/`、`artifacts/snapshot-jlink/` | J-Link 连通性与寄存器快照证据 |
 | `artifacts/flash-jlink3`、`flash-jlink4`、`flash-jlink5` | J-Link 烧录证据；`flash-jlink5` 写入前后逐段 `matched` + `liveness advanced 1512`（`rate_hz 1008.0`） |
@@ -164,7 +164,7 @@ python -X utf8 scripts\piny_trace.py record --output artifacts\board-run8 --seco
 2. ~~`cycle_frequency_hz = 550000000` 未与固件 `configCPU_CLOCK_HZ` 对齐核实~~ **已核实（2026-10-12）**：`Src/Config/FreeRTOSConfig.h:31` 是 `#define configCPU_CLOCK_HZ (SystemCoreClock)`，而 SystemView 的 `SEGGER_SYSVIEW_Config_FreeRTOS.c:68` 是 `#define SYSVIEW_TIMESTAMP_FREQ (configCPU_CLOCK_HZ)`，同一文件 `:71` 的 `SYSVIEW_CPU_FREQ` 也是它。也就是说 SystemView 做负载计算时除以的频率，定义上就等于 `SystemCoreClock`；板上符号读数为 `550000000`，profile 的 `cycle_frequency_hz` 与之一致，无需修正。注意 `configTICK_RATE_HZ` 是 `1000`，因此每个 tick 周期是 550000 个 CPU 周期。
 3. 跟踪身份仍是 SEGGER 样例硬编码的 `N=FreeRTOS Demo Application,D=Cortex-M4,O=FreeRTOS`（来自 `ThirdParty/systemview/Sample/FreeRTOSV11/Config/Cortex-M/SEGGER_SYSVIEW_Config_FreeRTOS.c`），需要改成 PinyCore 自己的名字；这属于 ThirdParty 配置改动，改之前要先报告并取得批准。
 4. 还没有一次真实的「优化前后」对比（`record` + `compare`）。
-5. ~~已安装副本尚未同步~~ **已同步（2026-10-12）**：14 个文件逐个 SHA256 校验复制到 `E:\Ele\Project\rm\PinyCore\.dsh\skills\PinyCore-debug`，对方的 `agents/openai.yaml` 保留、验证过程产生的 `__pycache__`/`artifacts` 已清掉，并在该目录跑通 `Ran 129 tests ... OK (skipped=1)`。注意：本次仓库化（`README.md`/`.gitignore`/`LICENSE`/`tools/`/`.github/`、`piny_trace.build_parser`、`--version`）**是同步之后才发生的**，所以已安装副本现在又落后了，需要再同步一次（见下一步建议 1）。
+5. ~~已安装副本尚未同步~~ **已同步（2026-10-12 一轮）**：14 个文件逐个 SHA256 校验复制到 `E:\Ele\Project\rm\PinyCore\.dsh\skills\PinyCore-debug`，对方的 `agents/openai.yaml` 保留、验证过程产生的 `__pycache__`/`artifacts` 已清掉，并在该目录跑通全套测试。注意：仓库化（`README.md`/`.gitignore`/`LICENSE`/`tools/`/`.github/`、`piny_trace.build_parser`、`--version`）**发生在那次同步之后**，且 CI 又改了两个测试文件，所以已安装副本现在又落后了，需要再同步一次（见下一步建议 2）。
 6. 旧 Codex 副本 `C:\Users\User\.codex\skills\PinyCore-debug` 已过期，等用户决定删除或保留。
 7. `identify`/`registers` 的**开关行为仍不完美**：J-Link 连接会把核停下，脚本现在靠 tick 探测识别并自动恢复，但“被别的调试器停住的核”与“本次连接停下的核”在寄存器层面无法区分，只能靠 tick 动/不动来判断。若 tick 地址未知（换了固件没更新 profile），这个判断会退化为 `checked=false`。
 8. 未披露事项已补记：调试期我曾**未经当次授权**对板子执行过一次 `monitor reset 0`（只读探测的一部分），已如实向用户报告；当时恢复运行，之后又用烧录与 tick 读数复核过板子状态正常。
@@ -175,7 +175,7 @@ python -X utf8 scripts\piny_trace.py record --output artifacts\board-run8 --seco
 ## 下一步建议
 
 1. **提交并推送仓库**（未完成项 11）：工作区已是内容完整、四个自检脚本全绿的仓库状态。在 `E:\Ele\Project\rm\PinyCore-debug` 里单独 `git init`（**不要**用它的父目录 `E:\Ele\Project`——那是一个装着别人底盘固件、且还没有任何提交的仓库），首次提交用 conventional commit 格式（参考 PinyCore 的 `git log`），推到 `https://github.com/Minhyuin/PinyCore-debug-skill.git` 的 `main`，然后看第一次 CI 是否在两个平台上都绿。
-2. **再同步一次已安装副本**（未完成项 5）：本次仓库化新增/改动的内容还没进 `E:\Ele\Project\rm\PinyCore\.dsh\skills\PinyCore-debug`。至少要带过去 `SKILL.md`、`STATUS.md`、`README.md`、`LICENSE`、`.gitignore`、`tools/` 四个脚本、`.github/` 整套、`scripts/piny_trace.py`（新 `build_parser`）、`scripts/piny_debug.py`（`__version__`）。照例保留对方的 `agents/openai.yaml`，同步后在该目录跑一次 `python -X utf8 -m unittest discover -s tests -t tests` 确认 129 tests 通过。
+2. **再同步一次已安装副本**（未完成项 5）：本次仓库化新增/改动的内容还没进 `E:\Ele\Project\rm\PinyCore\.dsh\skills\PinyCore-debug`。至少要带过去 `SKILL.md`、`STATUS.md`、`README.md`、`LICENSE`、`.gitignore`、`tools/` 四个脚本、`.github/` 整套、`scripts/piny_trace.py`（新 `build_parser`）、`scripts/piny_debug.py`（`__version__`）。照例保留对方的 `agents/openai.yaml`，同步后在该目录跑一次 `python -X utf8 -m unittest discover -s tests -t tests` 确认 130 tests 通过。
 3. 在固件侧改掉跟踪身份字符串（需先批准，见未完成项 3），然后跑一次基线 `record --seconds 20` 留档，作为后续优化的对照（未完成项 4 的前置）。
 4. 真正的下一步优化候选已定位（`Src/System/INS/INS.cpp:53-104` 的 ~946 Hz 轮询、单次 169 µs 且抖动仅 0.7 %），但用户明确表示那 17 % 是"想知道有没有浪费"而非瓶颈，所以**不要**在未获指示时改动 PinyCore 源码。
 5. 拿到第二台 Windows 机器时先跑 `doctor --portable`，核对 `source` 字段是否符合预期（未完成项 10）。

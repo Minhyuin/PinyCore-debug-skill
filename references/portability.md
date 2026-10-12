@@ -119,7 +119,7 @@ machine actually has; a missing tool is reported, not invented.
 
 ## What has and has not been verified
 
-- Verified: the whole test suite (129 tests, `OK (skipped=1)`) runs against temporary directories
+- Verified: the whole test suite (130 tests, `OK (skipped=1)`) runs against temporary directories
   and patched probes, so it exercises the discovery logic without depending on this machine;
   `doctor --portable` on the development rig reports every tool from `profile` with
   `usable: true`; and a deliberately broken profile — `D:/code/PinyCore`, GDB and

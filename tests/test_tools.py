@@ -42,6 +42,23 @@ class FindToolTests(unittest.TestCase):
             self.assertEqual(report['path'], found)
             self.assertEqual(report['source'], 'PATH: arm-none-eabi-gdb')
 
+    def test_install_directories_are_searched_from_a_fixture(self):
+        # No environment variable and no `%` expansion here on purpose: that expansion is a
+        # Windows spelling, so a test that needs it cannot be run on the other platform in CI.
+        # What this asserts is the part that is portable -- the layout is globbed and, when two
+        # layouts match, the version-less one is preferred. `bases=[t]` is exactly the "here is
+        # where the tools live on this machine" input the profile supplies.
+        with tempfile.TemporaryDirectory() as t:
+            wanted = touch(Path(t) / 'SEGGER' / 'JLink' / 'JLinkGDBServerCL.exe')
+            touch(Path(t) / 'SEGGER' / 'JLink_V878' / 'JLinkGDBServerCL.exe')
+            with patch.object(pt, 'search_path', return_value=None):
+                report = pt.find_tool('jlink_gdb_server', None, bases=[t], with_registry=False)
+            self.assertEqual(report['path'], wanted)
+            self.assertEqual(report['source'], 'SEGGER/JLink (version-less)')
+
+    @unittest.skipUnless(sys.platform == 'win32',
+                         'INSTALL_BASES is a list of Windows spellings; on POSIX os.path.expandvars '
+                         'leaves %NAME% untouched, so there is no machine here to search')
     def test_install_directories_are_globbed_and_expanded(self):
         with tempfile.TemporaryDirectory() as t:
             wanted = touch(Path(t) / 'SEGGER' / 'JLink_V878' / 'JLinkGDBServerCL.exe')
