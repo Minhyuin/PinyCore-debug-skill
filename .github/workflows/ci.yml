@@ -1,0 +1,65 @@
+name: CI
+
+# Same trigger shape as PinyCore's own CI: a pull request gets the full treatment, and a push to
+# the default branch gets the cheap half, so a broken main is noticed before a release is cut.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The package promises the standard library and nothing else, so no pip install happens anywhere
+  # in this repository -- and that promise is exactly what this matrix tests.
+  tests:
+    name: tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Compile every module
+        run: python -m compileall -q scripts tests tools
+
+      - name: Unit tests
+        run: python -X utf8 -m unittest discover -s tests -t tests -v
+
+      - name: --version answers
+        run: |
+          python -X utf8 scripts/piny_debug.py --version
+          python -X utf8 scripts/piny_trace.py --version
+
+  repo-checks:
+    name: repository self-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # This is the half that has to work on a runner: no probe, no board, no SEGGER install.
+      # It compares documentation against the code, checks the template for one machine's paths,
+      # checks that the local profile is not tracked, and checks that the test count quoted in
+      # four separate documents is still true.
+      - name: Repository self-checks
+        run: python -X utf8 tools/check_repo.py
+
+      - name: Workflow files are well formed
+        run: python -X utf8 tools/check_workflows.py
+
+      - name: The template alone is enough to reach a diagnosis
+        run: python -X utf8 tools/smoke_doctor.py

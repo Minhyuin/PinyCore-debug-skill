@@ -1,0 +1,57 @@
+name: Bug report
+description: Something in the skill behaved wrongly, or refused to work
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not paste `profiles/pinycore.json` — it contains your machine's absolute paths
+        and your probe's serial number. Redact the paths; the shape of the file is enough.
+  - type: input
+    id: command
+    attributes:
+      label: The exact command
+      description: Copy it verbatim, including the profile and output arguments.
+      placeholder: python -X utf8 scripts/piny_debug.py --output artifacts/x identify
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened
+      description: The error text or the wrong number. Paste `result.json` if the command produced one.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `doctor`
+      description: |
+        `python -X utf8 scripts/piny_debug.py doctor` (add `--portable` if this is not the machine
+        the skill was developed on). It answers most "not found" questions by itself. Redact paths.
+      render: json
+    validations:
+      required: false
+  - type: input
+    id: environment
+    attributes:
+      label: Host
+      description: Windows version, Python version, and the probe (J-Link model or CMSIS-DAP/ST-Link).
+      placeholder: Windows 11 24H2, Python 3.13.12, J-Link EDU over SWD
+    validations:
+      required: true
+  - type: dropdown
+    id: board
+    attributes:
+      label: Is a target board attached?
+      options:
+        - 'Yes, and the probe is connected'
+        - 'No, this happens without hardware'
+    validations:
+      required: true

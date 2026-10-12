@@ -1,0 +1,6 @@
+interface:
+  display_name: "PinyCore-debug"
+  short_description: "PinyCore 实板 GDB 调试与 SystemView CPU 负载采集"
+  default_prompt: "使用 $pinycore-debug 检查 PinyCore 调试环境，并在授权范围内读取寄存器或采集 SystemView CPU 负载。"
+policy:
+  allow_implicit_invocation: true

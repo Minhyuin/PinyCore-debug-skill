@@ -1,0 +1,33 @@
+# Labels by head branch and by changed files, the same two dimensions PinyCore labels on.
+#
+# The first group is the one a contributor controls: the branch prefix is the type in the commit
+# convention documented in CONTRIBUTING.md, so a `fix/` branch labels itself.
+bug:
+  - head-branch: ['^fix/', '^bugfix/', '^hotfix/']
+enhancement:
+  - head-branch: ['^feat/', '^feature/']
+documentation:
+  - head-branch: ['^doc/', '^docs/']
+performance:
+  - head-branch: ['^perf/']
+
+# The second group is by content. A change to the docs is a documentation change whatever the
+# branch is called, and a change under `.github/` is a workflow change even when it is a typo fix.
+workflow:
+  - changed-files:
+      - any-glob-to-any-file: ['.github/**', 'tools/check_repo.py', 'tools/check_workflows.py']
+documentation:
+  - changed-files:
+      - any-glob-to-any-file: ['**/*.md', 'SKILL.md', 'STATUS.md', 'references/**']
+tests:
+  - changed-files:
+      - any-glob-to-any-file: ['tests/**']
+portability:
+  - changed-files:
+      - any-glob-to-any-file: ['scripts/piny_tools.py', 'profiles/**', 'references/portability.md']
+tracing:
+  - changed-files:
+      - any-glob-to-any-file: ['scripts/piny_trace.py', 'scripts/piny_view.py']
+registers:
+  - changed-files:
+      - any-glob-to-any-file: ['scripts/piny_debug.py']

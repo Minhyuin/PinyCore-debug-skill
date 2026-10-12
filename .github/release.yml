@@ -1,0 +1,32 @@
+# Release-note categories, the same mechanism PinyCore uses: GitHub groups merged pull requests
+# into these sections by label, and `generate_release_notes` is off in release.yml because this
+# repository writes its own notes from the commit log. Keeping the labels consistent is what makes
+# the GitHub-side grouping agree with the release notes format.
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+    authors:
+      - dependabot
+  categories:
+    - title: 新增 / Exciting New Features 🎉
+      labels:
+        - enhancement
+    - title: 修复 / Fix Changes 🛠
+      labels:
+        - bug
+    - title: 性能 / Performance ⚡
+      labels:
+        - performance
+    - title: 可迁移性 / Portability 🧳
+      labels:
+        - portability
+    - title: 文档 / Documentation 📖
+      labels:
+        - documentation
+    - title: CI/CD 🤖
+      labels:
+        - workflow
+    - title: 其他 / Other Changes
+      labels:
+        - '*'

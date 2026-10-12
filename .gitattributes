@@ -1,0 +1,7 @@
+# Everything here is text: Python, Markdown, JSON and YAML. Normalising to LF keeps the working
+# tree, the repository and the files a Linux CI runner checks out byte-identical, which matters
+# because the release workflow publishes SHA256SUMS.
+* text=auto eol=lf
+
+*.png binary
+*.zip binary

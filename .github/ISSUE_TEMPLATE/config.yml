@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: A tool was not found on my machine
+    url: https://github.com/Minhyuin/PinyCore-debug-skill/blob/main/references/portability.md
+    about: Run `doctor --portable` first — this page explains the discovery order and what to paste into your profile.
+  - name: SystemView asks for a licence
+    url: https://github.com/Minhyuin/PinyCore-debug-skill/blob/main/SKILL.md
+    about: The modal is answered automatically by window message; the SKILL.md section explains when it cannot be.

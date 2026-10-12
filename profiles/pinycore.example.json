@@ -1,0 +1,57 @@
+{
+  "_comment": [
+    "Template for a machine that is NOT the one this skill was developed on.",
+    "Copy it to profiles/<your-rig>.json and run:",
+    "    python scripts/piny_debug.py --profile profiles/<your-rig>.json doctor --portable",
+    "doctor will tell you which entries below are wrong and print ready-to-paste replacements.",
+    "Every absolute path here is a placeholder: replace it or let discovery find the tool.",
+    "None of these paths are used by the code directly -- the profile is the only place a",
+    "machine-specific path is allowed to live."
+  ],
+
+  "name": "my-rig",
+  "project": "C:/path/to/PinyCore",
+  "elf": "build/agent-profile/PinyCore.elf",
+
+  "_tools_comment": "Executables. doctor searches the profile, then PATH, then the usual install directories, then the SEGGER registry keys -- so a wrong path here is a finding, not a dead end.",
+  "gdb": "C:/path/to/arm-gnu-toolchain/bin/arm-none-eabi-gdb.exe",
+  "jlink_gdb_server": "C:/Program Files/SEGGER/JLink/JLinkGDBServerCL.exe",
+  "systemview": "C:/Program Files/SEGGER/SystemView/SystemView.exe",
+  "openocd": "C:/path/to/openocd/bin/openocd.exe",
+
+  "_probe_comment": "jlink for a SEGGER probe (SEGGER's driver owns the device, OpenOCD cannot open it); openocd for CMSIS-DAP/ST-Link.",
+  "probe": "jlink",
+  "jlink_device": "STM32H723VG",
+  "jlink_serial": "PUT-YOUR-PROBE-SERIAL-HERE",
+  "jlink_speed_khz": 24000,
+  "jlink_gdb_port": 2331,
+  "systemview_control_port": 19050,
+
+  "_openocd_comment": "Only read when probe is openocd.",
+  "interface_config": "tools/openocd/dap.cfg",
+  "target_config": "target/stm32h7x.cfg",
+  "target": "stm32h7x.cpu0",
+  "adapter_khz": 500,
+
+  "_target_comment": "Properties of the board, not of the computer. Re-derive them on a new rig instead of copying them: a wrong value here produces plausible-looking numbers that are wrong.",
+  "expected_device_id": "0x483",
+  "idcode_address": "0x5c001000",
+  "cycle_frequency_hz": 550000000,
+  "ram_ranges": [
+    [536870912, 131072],
+    [603979776, 131072],
+    [805306368, 32768],
+    [939524096, 16384]
+  ],
+  "rtt_poll_ms": 1,
+  "isr_coverage": "partial: FreeRTOS port hooks; application IRQ entry/exit not fully instrumented",
+
+  "_liveness_comment": [
+    "OPTIONAL and normally best left out. The liveness check needs the address of FreeRTOS's",
+    "xTickCount, which is a property of one built image and moves on every rebuild. When this",
+    "key is absent the address is resolved from the ELF named above with arm-none-eabi-nm,",
+    "which is correct for whatever was built last. Set it only to override that, e.g. to watch",
+    "a different image than the one this profile builds."
+  ],
+  "freertos_tick_symbol": null
+}

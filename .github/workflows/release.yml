@@ -1,0 +1,101 @@
+name: Release
+
+# Same model as PinyCore's release workflow, with the automation made explicit: PinyCore derives
+# the tag from commit types; here the tag is pushed by hand and this workflow refuses to publish
+# one that disagrees with __version__ in the scripts. A skill that gets copied onto other people's
+# machines should not be able to disagree with itself about what version it is.
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to publish (must already exist and match __version__)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: Verify ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - id: tag
+        name: Resolve the tag
+        shell: bash
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          # Accept `1.2.3` from a manual run as well as `v1.2.3` from a tag push, then insist on
+          # the one spelling the rest of the pipeline uses.
+          case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "publishing $tag"
+
+      - name: Unit tests
+        run: python -X utf8 -m unittest discover -s tests -t tests -v
+
+      - name: Repository self-checks, including the tag
+        run: python -X utf8 tools/check_repo.py --tag ${{ steps.tag.outputs.tag }}
+
+      - name: The template alone is enough to reach a diagnosis
+        run: python -X utf8 tools/smoke_doctor.py
+
+  release:
+    name: Publish the release
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build the source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.verify.outputs.tag }}"
+          stage="PinyCore-debug-skill-${tag#v}"
+          # The archive is what a user actually copies into their project's skill directory, so it
+          # carries the skill and nothing about this repository's own tooling.
+          mkdir -p "dist/$stage"
+          for item in SKILL.md STATUS.md README.md LICENSE scripts references profiles tests; do
+            cp -R "$item" "dist/$stage/"
+          done
+          # The local profile must never travel: it holds absolute paths and a probe serial.
+          rm -f "dist/$stage/profiles/pinycore.json"
+          find "dist/$stage" -name '__pycache__' -type d -prune -exec rm -rf {} +
+          (cd dist && zip -qr "$stage.zip" "$stage")
+          (cd dist && sha256sum "$stage.zip" > SHA256SUMS)
+          echo "--- archive contents ---"
+          unzip -l "dist/$stage.zip"
+
+      - name: Release notes
+        shell: bash
+        run: |
+          tag="${{ needs.verify.outputs.tag }}"
+          python -X utf8 tools/release_notes.py "$tag" > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.verify.outputs.tag }}
+          name: ${{ needs.verify.outputs.tag }}
+          body_path: RELEASE_NOTES.md
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS
+          draft: false
+          prerelease: false
+          make_latest: true
+          generate_release_notes: false

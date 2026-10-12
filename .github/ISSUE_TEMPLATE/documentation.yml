@@ -1,0 +1,25 @@
+name: Documentation
+description: The documents and the code disagree, or a step does not work as written
+labels: ['documentation']
+body:
+  - type: input
+    id: where
+    attributes:
+      label: Which document, and which line
+      description: For example `SKILL.md` section 读取核心寄存器, or `references/portability.md`.
+    validations:
+      required: true
+  - type: textarea
+    id: says
+    attributes:
+      label: What it says
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: does
+    attributes:
+      label: What actually happens
+      description: The command you ran and its output. `tools/check_repo.py` catches several classes of this automatically — mention if it passed anyway, because then the check has a gap worth fixing.
+    validations:
+      required: true

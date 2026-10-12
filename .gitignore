@@ -1,0 +1,22 @@
+# Every command writes this run's evidence here (see SKILL.md). It reaches hundreds of MB
+# after a few trace recordings, so it never belongs in the repository.
+artifacts/
+
+# The real profile names this machine's tool paths and this rig's probe serial. It is what
+# `doctor` reads and what the commands default to, so it stays on the machine that made it:
+# a clone starts from profiles/pinycore.example.json instead.
+profiles/pinycore.json
+
+# Per-rig profiles someone creates while migrating. Only the example is shared.
+profiles/*.json
+!profiles/pinycore.example.json
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Windows
+Thumbs.db
+desktop.ini

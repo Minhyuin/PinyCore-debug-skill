@@ -1,0 +1,36 @@
+name: Feature request
+description: A capability the skill does not have yet
+labels: ['enhancement']
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The task you could not do
+      description: |
+        Describe the debugging or measuring job, not the API you want. "I cannot tell which task
+        holds the SPI bus" is more useful than "add a --spi flag".
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you do instead today
+      description: Manual GDB session, SystemView GUI, reading the RTT log by hand, nothing at all.
+    validations:
+      required: false
+  - type: input
+    id: probe
+    attributes:
+      label: Probe and target
+      description: Which probe and which MCU this would need to work on. A feature that only works on one probe is still worth asking for, but say so.
+      placeholder: J-Link over SWD, STM32H723VG
+    validations:
+      required: false
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints this would have to respect
+      options:
+        - label: Standard library only (no new dependency)
+        - label: Must not reset or flash the target without explicit authorization
+        - label: Must work without a desktop session (the license dialog is answered by window messages)
