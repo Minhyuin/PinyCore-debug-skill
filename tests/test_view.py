@@ -241,12 +241,18 @@ class MessageBoxTests(unittest.TestCase):
         original = backend.find_default_button
         v.child_windows = lambda hwnd: (seen.append(hwnd), children)[1]
         try:
-            button = v.find_default_button(window)
+            # TWICE on purpose: the overlay runs on every call, and the second call is where a
+            # wrapper around the first wrapper showed up (the Linux job asked once inside a test
+            # that then asserted on a second call and got None).
+            for _ in range(2):
+                button = v.find_default_button(window)
+                self.assertIsNotNone(button, 'the second call lost the replaced lookup')
+                self.assertEqual(button['rect'], [1108, 745, 1201, 773])
         finally:
             v.child_windows = saved_local
             backend.child_windows = saved_backend
             backend.find_default_button = original
-        self.assertEqual(seen, [1], 'the replaced lookup was never called')
+        self.assertEqual(seen, [1, 1], 'the replaced lookup was called once per search')
         self.assertIsNotNone(button)
         self.assertEqual(button['rect'], [1108, 745, 1201, 773])
 

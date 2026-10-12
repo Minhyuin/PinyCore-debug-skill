@@ -203,14 +203,22 @@ def _overlay(module):
     out (``RecursionError`` in three ``test_view`` cases). The backend's original is looked up
     before anything is installed, and the wrapper carries ``_dispatch_forward`` so the next call
     does not push a second copy on top of it.
+
+    There is no module-level "already installed" flag for those names, so the installed wrapper is
+    its own flag: it carries ``_dispatch_wraps`` (the function it wraps), and a value already
+    carrying it is left alone. Wrapping unconditionally wrapped the previous wrapper on every
+    call, and the Linux job caught it -- ``test_button_is_found_by_shape_in_the_bottom_band``
+    asked twice, got the button the first time and ``None`` the second, because by then the
+    backend was calling a wrapper around the stand-in it had just been given.
     """
     for name in _PUSH_ON_REPLACE:
         function = globals().get(name)
         if function is None:
             continue
+        current = getattr(module, name, None)
         if name not in _FORWARDED:
-            if not getattr(function, '_dispatch_forward', False):
-                setattr(module, name, _wrapper(getattr(module, name, function)))
+            if not hasattr(current, '_dispatch_wraps'):
+                setattr(module, name, _wrapper(current if current is not None else function))
             continue
         if getattr(function, '_dispatch_forward', False):
             setattr(module, name, _proxy(name))
@@ -224,6 +232,7 @@ def _wrapper(function):
         return function(*args, **kwargs)
     call.__name__ = getattr(function, '__name__', 'wrapped')
     call._dispatch_forward = True
+    call._dispatch_wraps = function
     return call
 
 
