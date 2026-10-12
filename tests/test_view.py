@@ -208,6 +208,12 @@ class MessageBoxTests(unittest.TestCase):
         self.assertTrue(set(v._FORWARDED) <= set(v._PUSH_ON_REPLACE))
 
     def test_button_is_found_by_shape_in_the_bottom_band(self):
+        # Needs a backend: the shape rule lives in each backend, and with none reachable (a Linux
+        # runner with no DISPLAY, say) the dispatcher has nothing to ask and answers None -- which
+        # the Ubuntu job reported as a failure in this test. Skipping is the honest outcome there;
+        # the rule itself is exercised on Windows and in the X11 CI job.
+        if v.backend() is None:
+            self.skipTest('no dialog backend in this session to run the shape rule in')
         window = {'hwnd': 1, 'rect': (696, 289, 1214, 786)}   # 518 x 497, measured
         children = [
             {'hwnd': 2, 'class': 'QWidget', 'text': '', 'rect': (709, 366, 1201, 725)},  # text area
@@ -257,6 +263,11 @@ class MessageBoxTests(unittest.TestCase):
         self.assertEqual(button['rect'], [1108, 745, 1201, 773])
 
     def test_no_button_child_reports_none_rather_than_guessing(self):
+        # Not load-bearing -- this case expects None and gets None either way -- but without the
+        # guard the pass would be earned by an absent backend rather than by the shape rule, and
+        # that is the kind of green that hides a regression.
+        if v.backend() is None:
+            self.skipTest('no dialog backend in this session to run the shape rule in')
         window = {'hwnd': 1, 'rect': (100, 100, 400, 300)}
         saved = v.child_windows
         v.child_windows = lambda hwnd: [{'hwnd': 2, 'class': 'QWidget', 'text': '',
