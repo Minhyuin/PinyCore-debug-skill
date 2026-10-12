@@ -138,16 +138,19 @@ machine actually has; a missing tool is reported, not invented.
 ## What has and has not been verified
 
 - Verified: the whole test suite (182 tests) runs against temporary directories
-  on both platforms. The skipped count is a machine fact, not a constant: a plain Windows
-  account skips 2 (no symlink privilege, no X display), the CI Windows runner skips 1, and a
-  Linux host swaps in its own set (no `%VAR%` install vocabulary, no registry, plus the dialog
-  cases when there is no X display). Judge a run by its test count and failures, never by the
-  skipped number matching a document.
-  The suite runs against temporary directories and patched probes, so it exercises the
-  discovery logic without depending on this machine.
-  `test_tools.py` covers the Windows half, `test_linux.py` the Linux half (install bases, `%VAR%`
-  expansion, SEGGER's Linux executable spellings, version-less-directory preference, platform
-  dispatch), and `test_view_x11.py` the X11 licence-dialog backend.
+  and patched probes on both platforms, so it exercises the discovery logic without depending on
+  what this machine has installed. The skipped count is a machine fact, not a constant: a plain
+  Windows account skips 2 (no symlink privilege, no X display), the CI Windows runner skips 1, and
+  a Linux host swaps in its own set (no `%VAR%` install vocabulary, no registry, plus the dialog
+  and button-search cases when there is no X display). Judge a run by its test count and failures,
+  never by the skipped number matching a document.
+- The cases that need a dialog backend ask `piny_view.backend()` before asserting, because a
+  machine with no user32 and no X display has nothing to drive: the button-shape rule lives inside
+  each backend, so "the backend answered None" and "the rule found no button" are different facts
+  and only one of them is a regression. `test_tools.py` covers the Windows half of discovery,
+  `test_linux.py` the Linux half (install bases, `%VAR%` expansion, SEGGER's Linux executable
+  spellings, version-less-directory preference, platform dispatch), and `test_view_x11.py` the X11
+  licence-dialog backend.
 - Verified: `doctor --portable` on the development rig reports every tool from `profile` with
   `usable: true`; and a deliberately broken profile — `D:/code/PinyCore`, GDB and
   `JLinkGDBServerCL.exe` under `C:/Users/Someone/...` and `D:/Tools/...` — was recovered on this
