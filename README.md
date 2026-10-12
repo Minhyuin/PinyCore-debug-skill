@@ -100,7 +100,7 @@ scripts/
   piny_view.py            模态框应答的分派层：平台无关的轮询/武装/重试循环
   piny_view_win32.py      Win32 后端（ctypes + user32，无第三方依赖）
   piny_view_x11.py        X11 后端（XTest，其次 XSendEvent）
-tests/                    182 个用例，全部在临时目录或打桩下运行，不依赖本机装了什么：
+tests/                    183 个用例，全部在临时目录或打桩下运行，不依赖本机装了什么：
                           test_debug.py（探针、烧录、liveness）、test_tools.py（可迁移性与探测）、
                           test_linux.py（Linux 发现层）、test_trace.py（质量门、导出校验）、
                           test_view.py（模态框应答流程）、test_view_x11.py（X11 后端的几何、
@@ -128,11 +128,11 @@ agents/openai.yaml        agent 清单
 
 CI 用 `python -X utf8 -m unittest discover -s tests -t tests`，因为本项目不依赖 `pytest`——**这个仓库里的每个脚本都只用标准库**，CI 里没有任何 pip 安装步骤。
 
-两个平台上**跑到的用例数一样（182），跳过的个数不一样**，因为跳过的正是"这个平台上没有对应代码路径 / 没有对应权限"的那些，所以这个数字本身也是本机事实，不必硬记。差异来自三处：`test_tools.py` 里只描述内置 Windows 遍历的探测用例（`%VAR%` 安装目录词表、注册表）在 Linux 上跳过、Windows 上运行；`test_view.py` 里驱动真实后端的用例（模态框应答、按钮按形状识别）只在既没有 user32 也没有 X display 时才跳过——判断条件是 `piny_view.backend()` 有没有后端，而不是平台名，因为按钮识别规则本身住在两个后端里，没有后端时"返回 None"与"没找到按钮"是两回事；符号链接用例在没有创建权限的账户上跳过——本机（普通用户）跳过它，CI 的 Windows runner 有该权限所以运行它，于是本机是 `skipped=2`、CI 上是 `skipped=1`。跳过的是"这台机器上根本不存在的东西"，而不是藏起跑不过的断言：`test_tools.py` 里 Windows 专属的用例用 `pt.inventory() is None` 守卫（也就是"本机走的就是内置遍历"），Linux 那一半的同一个契约由 `test_linux.py` 覆盖（28 条发现层用例）。X11 那一侧不是靠"跳过就算过"来交差的：`ci.yml` 的 `x11` 任务会先断言 `libX11`/`libXtst`/`libXft` 都加载成功、后端确实是 X11 后端，才让它跑测试。
+两个平台上**跑到的用例数一样（183），跳过的个数不一样**，因为跳过的正是"这个平台上没有对应代码路径 / 没有对应权限"的那些，所以这个数字本身也是本机事实，不必硬记。差异来自三处：`test_tools.py` 里只描述内置 Windows 遍历的探测用例（`%VAR%` 安装目录词表、注册表）在 Linux 上跳过、Windows 上运行；`test_view.py` 里驱动真实后端的用例（模态框应答、按钮按形状识别）只在既没有 user32 也没有 X display 时才跳过——判断条件是 `piny_view.backend()` 有没有后端，而不是平台名，因为按钮识别规则本身住在两个后端里，没有后端时"返回 None"与"没找到按钮"是两回事；符号链接用例在没有创建权限的账户上跳过——本机（普通用户）跳过它，CI 的 Windows runner 有该权限所以运行它，于是本机是 `skipped=2`、CI 上是 `skipped=1`。跳过的是"这台机器上根本不存在的东西"，而不是藏起跑不过的断言：`test_tools.py` 里 Windows 专属的用例用 `pt.inventory() is None` 守卫（也就是"本机走的就是内置遍历"），Linux 那一半的同一个契约由 `test_linux.py` 覆盖（27 条发现层用例）。X11 那一侧不是靠"跳过就算过"来交差的：`ci.yml` 的 `x11` 任务会先断言 `libX11`/`libXtst`/`libXft` 都加载成功、后端确实是 X11 后端，才让它跑测试。
 
 **尚未实测的部分要说清楚**：X11 后端在 CI 上验证的是"能连上裸 X server、几何计算与降级路径正确"，`button_layout` 用的 0.80/0.90 两个比例仍是 Windows 上的实测值，在 Linux 上属于假设——真正的 Linux 实板采集还没跑过。
 
-另外两条是第一次 Linux CI 跑出来的真实教训，值得单独记住：**（1）**`piny_view.py` 把转发项拷进后端模块时是"谁最后调用就留谁的补丁"，跨调用会留下状态——在真 X display 上表现成拿一个只存在于测试里的窗口句柄去查询，libX11 直接以 `BadWindow` 结束进程；现在转发项是**调用时**才解析的代理，补丁的作用范围跟调用者一致。**（2）**libX11 对未处理的协议错误是 `exit()`，不是异常，所以 X11 后端装了 `XSetErrorHandler`：窗口在"枚举到查询"之间消失时得到的是空结果，而不是一次没有报告的崩溃。
+另外三条是第一次 Linux CI 跑出来的真实教训，值得单独记住：**（1）**`piny_view.py` 把转发项拷进后端模块时是"谁最后调用就留谁的补丁"，跨调用会留下状态——在真 X display 上表现成拿一个只存在于测试里的窗口句柄去查询，libX11 直接以 `BadWindow` 结束进程；现在转发项是**调用时**才解析的代理，补丁的作用范围跟调用者一致。**（2）**libX11 对未处理的协议错误是 `exit()`，不是异常，所以 X11 后端装了 `XSetErrorHandler`：窗口在"枚举到查询"之间消失时得到的是空结果，而不是一次没有报告的崩溃。**（3）**平台专属的分支**只有在该平台上真正跑到才算测过**：`piny_view_x11.child_windows` 把句柄先包成 `ctypes.c_ulong`，在 Windows 上完全看不出来（那半边是另一份实现），一到真 X server 就是 `TypeError: 'c_ulong' object cannot be interpreted as an integer`；此前所有用例要么打桩 `child_windows` 要么走代理，枚举循环一次都没真跑。所以现在有一条"把补丁取回后后端不能再看见它"的回归用例会**真的调用**后端自己的枚举——它先是暴露了这个缺陷，也顺带证明了代理没把别人的补丁留在后端里。
 
 ### 本地自检
 

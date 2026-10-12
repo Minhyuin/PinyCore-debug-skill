@@ -5,7 +5,8 @@ module's window lookups directly: they check the decision logic -- exactly one p
 the dialog goes away, repeated presses while it stays, and a report that tells an accepted
 dialog whose main window never appeared (wedged launch) apart from a healthy one.
 """
-import sys, unittest
+import contextlib, sys, unittest
+from unittest import mock
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import piny_view as v
@@ -284,6 +285,73 @@ class MessageBoxTests(unittest.TestCase):
             self.assertIsNone(v.find_default_button(window))
         finally:
             v.child_windows = saved
+
+    def test_the_backend_stops_seeing_a_stand_in_once_it_is_taken_back(self):
+        # The regression for the case that only the X11 CI job could see. Reaching the backend
+        # copies this module's stand-in into it; if the copy outlives the caller, a LATER test asks
+        # the backend a question about a real display and is answered with a widget list from a
+        # display that never existed. The X11 job reported it as
+        # `test_a_missing_display_is_not_an_error` -> `child_windows(1) == [{'hwnd': 2, ...}]`.
+        # The copy installed in the backend therefore re-reads THIS module at call time.
+        backend = v.backend()
+        if backend is None:
+            self.skipTest('no dialog backend in this session')
+        real = backend.child_windows          # whatever the backend does on its own
+        calls = []
+        marker = [{'hwnd': 2, 'class': 'QWidget', 'text': '', 'rect': (110, 110, 390, 290)}]
+        saved_local = v.child_windows
+        try:
+            v.child_windows = lambda hwnd: (calls.append(hwnd), marker)[1]
+            v.find_default_button({'hwnd': 1, 'rect': (100, 100, 400, 300)})
+            self.assertEqual(backend.child_windows(1), marker,
+                             'the backend did not see the replacement while it was in place')
+            v.child_windows = saved_local
+            # Two queries, and both are the search doing its job: the backend's own
+            # `find_default_button` reads this module first, and the wrapping call re-reads it to
+            # decide what the backend's own lookup now is. A third would mean the copy had started
+            # answering for itself.
+            self.assertEqual(calls, [1, 1])
+            # `child_windows` is a forwarded name, so the search must have left a copy in the
+            # backend. Asserted rather than returned around: a case that quietly stops exercising
+            # the copy when the copy disappears is the shape of a test that reports success for
+            # having done nothing.
+            self.assertIsInstance(backend.child_windows, v._Copy,
+                                  'nothing was pushed into the backend, so there is no copy to '
+                                  'stop seeing the stand-in')
+            # Each backend reaches its own child list through its own primitive, and there is no
+            # name that is right on both -- so whichever this backend has is the one replaced. An
+            # empty enumeration is the honest answer from a display that has nothing on it, and
+            # nothing real is touched.
+            patched = contextlib.ExitStack()
+            names = []
+            if hasattr(backend, '_user32'):
+                names.append('_user32')
+                patched.enter_context(mock.patch.object(backend, '_user32', return_value=mock.Mock()))
+            if hasattr(backend, '_display'):
+                # The connection has to be a number ctypes can pass: a Mock becomes a c_ulong and
+                # then "cannot be interpreted as an integer". A stand-in library is what makes the
+                # enumeration actually run and answer "nothing" (XQueryTree returns a Mock, which
+                # is falsy), rather than only proving that no library raises.
+                names.append('_display')
+                patched.enter_context(mock.patch.object(backend, '_libraries',
+                                                        return_value=(mock.Mock(), None)))
+                patched.enter_context(mock.patch.object(backend, '_display', return_value=1))
+            self.assertTrue(names, backend.__name__ + ' has no child primitive this case can pin')
+            with patched:
+                # Only the X11 module connects through `_display`, and only the win32 module has a
+                # `_user32`, so the proof that the stand-in took effect has to name whichever
+                # primitive this backend was pinned through.
+                if '_display' in names:
+                    self.assertEqual(backend._display(), 1,
+                                     'the connection stand-in is not in effect')
+                else:
+                    self.assertIsInstance(backend._user32(), mock.Mock,
+                                          'the library stand-in is not in effect')
+                self.assertEqual(backend.child_windows(1), [],
+                                 'the backend still answers from a stand-in nobody owns')
+        finally:
+            v.child_windows = saved_local
+            backend.child_windows = real
 
     def test_message_box_titles_do_not_match_the_main_window(self):
         for title in ['SEGGER SystemView V3.60e',

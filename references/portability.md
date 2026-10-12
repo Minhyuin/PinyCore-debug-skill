@@ -137,7 +137,7 @@ machine actually has; a missing tool is reported, not invented.
 
 ## What has and has not been verified
 
-- Verified: the whole test suite (182 tests) runs against temporary directories
+- Verified: the whole test suite (183 tests) runs against temporary directories
   and patched probes on both platforms, so it exercises the discovery logic without depending on
   what this machine has installed. The skipped count is a machine fact, not a constant: a plain
   Windows account skips 2 (no symlink privilege, no X display), the CI Windows runner skips 1, and

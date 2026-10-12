@@ -37,8 +37,14 @@ import time
 #: This module, so a copy installed in a backend can read THIS file's current name instead of the
 #: function it was handed. A caller who replaces ``piny_view.windows`` expects the backend's lookup
 #: to use the replacement, and a copy that captured the original at install time would go on using
-#: it -- see ``_wrapper``.
+#: it -- see ``_Forwarder``.
 _MODULE = sys.modules[__name__]
+
+#: What each backend had under a pushed name BEFORE this module touched it, keyed by
+#: ``(module, name)``. Both modules define a function of the same name -- ``piny_view.windows`` and
+#: ``piny_view_x11.windows`` are different objects -- so "is this the backend's own function?" has
+#: to be answered by remembering it, not by comparing identities.
+_ORIGINAL = {}
 
 #: Title of the blocking modal. Matched case-insensitively as a substring.
 DIALOG_TITLE = 'No Commercial-Use License'
@@ -171,101 +177,100 @@ _FORWARDED = ('_text_width', '_stable_rect', '_client_size', '_enumerate_windows
 _PUSH_ON_REPLACE = _FORWARDED + ('find_default_button',)
 
 
-def _backend_call(name, *args, **kwargs):
-    """Call ``name`` in the backend that is chosen right now, or ``None`` when there is none.
+class _Copy:
+    """The backend's own function under a name this module does not forward.
 
-    A forwarding function and a replaced one both have to work, and the difference only shows up
-    when someone patches a name here (a test, or a caller pinning a metric):
-
-      * not replaced -- the forwarding function would call itself, so the backend's own function
-        is reached by looking it up in the module here, at call time;
-      * replaced -- the replacement is what runs.
-
-    Looking it up at call time rather than copying it into the backend module is what keeps the
-    patch scoped to the caller. A copy lives on: the next call from anywhere would still use the
-    previous caller's stand-in, which on a real X display means poking a window handle that only
-    ever existed in a test.
+    ``find_default_button`` is the one such name: each backend has its own, and the dispatcher
+    calls it through the backend. A copy is installed in the backend only so that code INSIDE the
+    backend -- ``find_default_button`` reading the backend's own ``child_windows`` -- can be
+    pointed back at this module. A call arriving here is therefore the original, unchanged: there
+    is no replacement of this name to honour.
     """
-    module = backend()
-    if module is None:
-        return None
-    function = globals().get(name)
-    if getattr(function, '_dispatch_forward', False):
-        return getattr(module, name)(*args, **kwargs)
-    return function(*args, **kwargs)               # a replacement: calling it IS the point
+
+    def __init__(self, module, name, original):
+        self._module = module
+        self._name = name
+        self._original = original
+        self._dispatch_forward = True
+        self.__name__ = name
+
+    def __call__(self, *args, **kwargs):
+        if self._original is None:
+            raise AttributeError(
+                'the backend has no %s of its own to forward to' % self._name)
+        return self._original(*args, **kwargs)
+
+
+class _Forwarder(_Copy):
+    """A copy of a name that IS this module's forwarding call.
+
+    The backend's value is replaced only where a caller wants the BACKEND's behaviour changed --
+    ``find_default_button`` reads ``child_windows`` from the backend's own module, so a caller
+    pinning ``piny_view.child_windows`` used to change nothing (measured: the Ubuntu runner
+    answered ``unexpectedly None``). Installing a forwarder makes the backend's search read this
+    module, and at call time a replacement found here is what runs; otherwise the backend's own
+    function does. Handing over a plain copy of the replacement instead made the copy outlive its
+    caller -- the backend went on answering from a stand-in nobody owned, which is what a later
+    X11 case saw when it asked about a display it had just made unreachable.
+    """
+
+    def __call__(self, *args, **kwargs):
+        function = getattr(_MODULE, self._name, None)
+        # A forwarding entry is this module's way of saying "ask the backend", so it is not a
+        # replacement: calling it here would arrive straight back at this object.
+        if function is not None and not getattr(function, '_dispatch_forward', False):
+            return function(*args, **kwargs)
+        return super().__call__(*args, **kwargs)
 
 
 def _overlay(module):
     """Point ``module``'s forwarded names at this file, so a patch here reaches the backend.
 
-    An entry still holding its original forwarding function must NOT be copied down (it forwards
-    to the same name, so the call would recurse until the stack runs out). What is installed
-    instead is a small proxy that decides at call time which of the two it is -- see
-    ``_backend_call``. The ``_dispatch_forward`` marker is what distinguishes the two cases.
+    Two things are being balanced, and both have been got wrong in this file before.
 
-    Names in ``_PUSH_ON_REPLACE`` that are not forwarding calls (``find_default_button``) exist in
-    the backend under the same name, and the copy installed there must call the BACKEND's original,
-    never this file's dispatcher -- otherwise the two modules call each other and the stack runs
-    out (``RecursionError`` in three ``test_view`` cases). The backend's original is looked up
-    before anything is installed, and the copy carries ``_dispatch_forward`` so the next call does
-    not push a second copy on top of it.
+    A name that IS this module's own forwarding call must not be copied down as-is: the copy would
+    forward to the same name and the two modules would take turns until the stack ran out
+    (``RecursionError`` in three ``test_view`` cases). ``_Forwarder`` is what goes down instead --
+    it reads this module at call time and can therefore be taken out of the picture again by the
+    caller who put it in.
 
-    Nothing is installed when the backend's current value is neither this file's forwarding
-    function nor one of these copies -- because then somebody put it there (a test, or a caller who
-    replaced the backend's own function) and it must survive. Re-installing unconditionally, which
-    this did at first, wiped out a patch made through the backend: the X11 job showed it as
-    ``test_a_message_box_is_not_the_main_window`` failing with ``TypeError`` because the patched
-    ``piny_view_x11.windows`` had been replaced by a fresh proxy pointing back at this module's
-    untouched forwarder.
+    A name that is NOT a forwarding call (``find_default_button``) exists in each backend in its own
+    right, and the copy installed there must never call this file's dispatcher: that is the same
+    recursion from the other direction. ``_Copy`` calls the BACKEND's original, and exists only so
+    that code inside the backend -- ``find_default_button`` reading its own module's
+    ``child_windows`` -- reads this module instead.
+
+    Nothing is installed over a value this module did not put there and that is not the backend's
+    own: somebody else owns it (a test, or a caller pinning the backend's function) and it has to
+    survive. Re-installing unconditionally, which this did at first, wiped out a patch made through
+    the backend -- the X11 job showed it as ``test_a_message_box_is_not_the_main_window`` failing
+    with ``TypeError``, because the patched ``piny_view_x11.windows`` had been replaced by a fresh
+    proxy pointing back at this module's untouched forwarder.
+
+    What is deliberately NOT done is retracting a copy later. The first design tried to, recorded
+    every push in ``_PUSHED`` and restored ``original`` when this module's value changed back -- and
+    it failed, because ``_overlay`` only runs from a dispatcher call, so nothing retracts anything
+    after the caller stops going through the dispatcher. Live lookup is what actually solves it: a
+    backend holding a ``_Forwarder`` stops seeing a stand-in the moment the caller's own value is
+    back, with nothing to undo.
     """
     for name in _PUSH_ON_REPLACE:
         function = globals().get(name)
         if function is None:
             continue
         current = getattr(module, name, None)
-        untouched = current is None or current is function
-        if name not in _FORWARDED:
-            if not hasattr(current, '_dispatch_wraps') and untouched:
-                setattr(module, name, _wrapper(current if current is not None else function))
+        if isinstance(current, _Copy):
+            continue                       # the backend already holds a copy of this name
+        own = _ORIGINAL.setdefault((module, name), current)
+        # The two modules define their own function under the same name, so identity cannot tell
+        # them apart -- asking whether ``current is function`` skipped every name and installed
+        # nothing at all. What has to survive is a value that is neither: a test, or a caller, that
+        # patched the BACKEND directly. Those are recognised by not being the backend's own value.
+        if current is not None and current is not own and current is not function:
             continue
-        if not getattr(function, '_dispatch_forward', False):
-            setattr(module, name, function)         # replaced here: push the replacement down
-        elif untouched:
-            setattr(module, name, _proxy(name))     # untouched everywhere: install the proxy
-
-
-def _dispatch_target(name, function):
-    """The callable a copy installed in a backend should actually run.
-
-    Normally that is the function the copy was built around -- for ``find_default_button`` it is
-    the BACKEND's original, which is the whole point of the copy. But while the name still holds
-    this file's own forwarding function, the copy re-reads the name at call time instead of
-    capturing it: a caller who replaces ``piny_view.windows`` expects the backend's
-    ``find_message_box`` to look at the replacement, and a captured original would quietly ignore
-    it.
-    """
-    def call(*args, **kwargs):
-        current = getattr(_MODULE, name, None)
-        if function is not None and current is not None and current is not function:
-            return current(*args, **kwargs)
-        return function(*args, **kwargs)
-    call.__name__ = getattr(function, '__name__', name)
-    call._dispatch_forward = True
-    call._dispatch_wraps = function
-    return call
-
-
-def _wrapper(function):
-    """A copy that will not be pushed down a second time (see ``_overlay``)."""
-    return _dispatch_target(getattr(function, '__name__', 'wrapped'), function)
-
-
-def _proxy(name):
-    def call(*args, **kwargs):
-        return _backend_call(name, *args, **kwargs)
-    call.__name__ = name
-    call._dispatch_forward = True                  # never proxied twice
-    return call
+        pushed = _Forwarder(module, name, current) if name in _FORWARDED \
+            else _Copy(module, name, current)
+        setattr(module, name, pushed)
 
 
 def _text_width(text, extent=BUTTON_FONT_PX):

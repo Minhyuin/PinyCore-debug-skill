@@ -280,7 +280,12 @@ def _display():
 
 
 def available():
-    """True when an X display is reachable, so window lookups can answer anything at all."""
+    """True when an X display is reachable, so window lookups can answer anything at all.
+
+    Every lookup calls this, and this calls ``_display()`` by name, so replacing ``_display``
+    gives the module a headless session to reason about without needing a session without a
+    display -- which a runner that starts ``Xvfb`` for these very tests does not have.
+    """
     return _display() is not None
 
 
@@ -470,7 +475,11 @@ def child_windows(hwnd):
         return []
     lib, _ = _libraries()
     found = []
-    for child in _children(ctypes.c_ulong(hwnd)):
+    # `hwnd` goes in as it arrived. Wrapping it in `ctypes.c_ulong` first -- which this did, and
+    # which is invisible on Windows because the whole file is a different implementation there --
+    # made the call raise `TypeError: 'c_ulong' object cannot be interpreted as an integer` under a
+    # real X server, whose windows are exactly the case this branch exists for.
+    for child in _children(hwnd):
         entry = _window_entry(lib, child)
         if entry is not None:
             found.append(entry)
