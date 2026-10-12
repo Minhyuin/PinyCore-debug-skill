@@ -34,6 +34,12 @@ import os
 import sys
 import time
 
+#: This module, so a copy installed in a backend can read THIS file's current name instead of the
+#: function it was handed. A caller who replaces ``piny_view.windows`` expects the backend's lookup
+#: to use the replacement, and a copy that captured the original at install time would go on using
+#: it -- see ``_wrapper``.
+_MODULE = sys.modules[__name__]
+
 #: Title of the blocking modal. Matched case-insensitively as a substring.
 DIALOG_TITLE = 'No Commercial-Use License'
 #: Window title of the SystemView main window (proves the modal is gone).
@@ -201,39 +207,57 @@ def _overlay(module):
     the backend under the same name, and the copy installed there must call the BACKEND's original,
     never this file's dispatcher -- otherwise the two modules call each other and the stack runs
     out (``RecursionError`` in three ``test_view`` cases). The backend's original is looked up
-    before anything is installed, and the wrapper carries ``_dispatch_forward`` so the next call
-    does not push a second copy on top of it.
+    before anything is installed, and the copy carries ``_dispatch_forward`` so the next call does
+    not push a second copy on top of it.
 
-    There is no module-level "already installed" flag for those names, so the installed wrapper is
-    its own flag: it carries ``_dispatch_wraps`` (the function it wraps), and a value already
-    carrying it is left alone. Wrapping unconditionally wrapped the previous wrapper on every
-    call, and the Linux job caught it -- ``test_button_is_found_by_shape_in_the_bottom_band``
-    asked twice, got the button the first time and ``None`` the second, because by then the
-    backend was calling a wrapper around the stand-in it had just been given.
+    Nothing is installed when the backend's current value is neither this file's forwarding
+    function nor one of these copies -- because then somebody put it there (a test, or a caller who
+    replaced the backend's own function) and it must survive. Re-installing unconditionally, which
+    this did at first, wiped out a patch made through the backend: the X11 job showed it as
+    ``test_a_message_box_is_not_the_main_window`` failing with ``TypeError`` because the patched
+    ``piny_view_x11.windows`` had been replaced by a fresh proxy pointing back at this module's
+    untouched forwarder.
     """
     for name in _PUSH_ON_REPLACE:
         function = globals().get(name)
         if function is None:
             continue
         current = getattr(module, name, None)
+        untouched = current is None or current is function
         if name not in _FORWARDED:
-            if not hasattr(current, '_dispatch_wraps'):
+            if not hasattr(current, '_dispatch_wraps') and untouched:
                 setattr(module, name, _wrapper(current if current is not None else function))
             continue
-        if getattr(function, '_dispatch_forward', False):
-            setattr(module, name, _proxy(name))
-        else:
-            setattr(module, name, function)
+        if not getattr(function, '_dispatch_forward', False):
+            setattr(module, name, function)         # replaced here: push the replacement down
+        elif untouched:
+            setattr(module, name, _proxy(name))     # untouched everywhere: install the proxy
+
+
+def _dispatch_target(name, function):
+    """The callable a copy installed in a backend should actually run.
+
+    Normally that is the function the copy was built around -- for ``find_default_button`` it is
+    the BACKEND's original, which is the whole point of the copy. But while the name still holds
+    this file's own forwarding function, the copy re-reads the name at call time instead of
+    capturing it: a caller who replaces ``piny_view.windows`` expects the backend's
+    ``find_message_box`` to look at the replacement, and a captured original would quietly ignore
+    it.
+    """
+    def call(*args, **kwargs):
+        current = getattr(_MODULE, name, None)
+        if function is not None and current is not None and current is not function:
+            return current(*args, **kwargs)
+        return function(*args, **kwargs)
+    call.__name__ = getattr(function, '__name__', name)
+    call._dispatch_forward = True
+    call._dispatch_wraps = function
+    return call
 
 
 def _wrapper(function):
     """A copy that will not be pushed down a second time (see ``_overlay``)."""
-    def call(*args, **kwargs):
-        return function(*args, **kwargs)
-    call.__name__ = getattr(function, '__name__', 'wrapped')
-    call._dispatch_forward = True
-    call._dispatch_wraps = function
-    return call
+    return _dispatch_target(getattr(function, '__name__', 'wrapped'), function)
 
 
 def _proxy(name):

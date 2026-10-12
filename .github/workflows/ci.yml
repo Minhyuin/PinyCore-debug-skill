@@ -100,45 +100,6 @@ jobs:
         env:
           DISPLAY: ':99'
 
-      - name: DIAGNOSE the two failures on this runner
-        run: |
-          python -X utf8 - <<'PY'
-          import sys
-          from unittest import mock
-          sys.path.insert(0, 'scripts')
-          import piny_view as v
-          import piny_view_x11 as x
-          print('MARK 1 backend   :', v.backend_name())
-          print('MARK 2 available :', v.available(), x.available())
-          print('MARK 3 x module  :', x.__file__, x.windows, x.find_message_box)
-          print('MARK 4 same mod  :', sys.modules['piny_view_x11'] is x)
-          x_fmb_before = x.find_message_box
-          main = {'hwnd': 1, 'title': 'SEGGER SystemView V3.60e', 'class': '', 'rect': (0, 0, 1, 1)}
-          box = {'hwnd': 2, 'title': 'SystemView Error', 'class': '', 'rect': (0, 0, 1, 1)}
-          with mock.patch.object(x, 'windows', return_value=[main, box]):
-              print('MARK 5 x.windows :', x.windows)
-              print('MARK 6 same mod  :', sys.modules['piny_view_x11'] is x)
-              print('MARK 7 fmb ident :', x.find_message_box is x_fmb_before)
-              hit = []
-              x.windows = lambda process_id=None: (hit.append(1), [main, box])[1]
-              print('MARK 8 direct    :', x.find_message_box())
-              print('MARK 9 windows   :', x.windows())
-              print('MARK 10 calls    :', len(hit))
-              print('MARK 11 dispatch  :', v.find_message_box())
-              print('MARK 12 calls    :', len(hit))
-          with mock.patch.object(x, '_stable_rect', return_value=(401, 237, 1135, 627)):
-              print('MARK 13 layout   :', x.button_layout({'hwnd': 1}, client=(900, 441)))
-          print('MARK 14 patched  :', getattr(x.button_layout, '_dispatch_forward', 'absent'))
-          print('MARK 15 textwidth:', x._text_width('Accept'))
-          import piny_view_win32 as w
-          print('MARK 16 win mod  :', w.__file__)
-          print('MARK 17 win keys :', sorted(w.button_layout({'hwnd': 1,
-                'rect': (0, 0, 900, 441)}, client=(900, 441))))
-          print('MARK 18 win txt  :', w._text_width('Accept'))
-          PY
-        env:
-          DISPLAY: ':99'
-
       - name: Unit tests under a display
         run: python -X utf8 -m unittest discover -s tests -t tests -v
         env:

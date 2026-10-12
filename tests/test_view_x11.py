@@ -52,19 +52,27 @@ class BackendContractTests(unittest.TestCase):
         self.assertIn(x.available(), (True, False))
 
     def test_a_missing_display_is_not_an_error(self):
-        with mock.patch.dict(x.os.environ, {'DISPLAY': ''}, clear=False):
-            x._DISPLAY, x._DISPLAY_FAILED = None, False      # re-ask with DISPLAY emptied
-            try:
-                self.assertFalse(x.available())
-                self.assertEqual(x.windows(), [])
-                self.assertEqual(x.child_windows(1), [])
-                self.assertIsNone(x.find_dialog())
-                self.assertIsNone(x.find_message_box())
-                self.assertIsNone(x.find_main_window(timeout=0.0))
-                self.assertEqual(x.button_layout({'hwnd': 1}), {})
-            finally:
-                x._DISPLAY, x._DISPLAY_FAILED = None, False
-                x.available()                                 # restore the real answer
+        # `_DISPLAY_FAILED` is what makes the module's own `_display()` answer None, so it is set
+        # directly rather than by emptying `$DISPLAY` and hoping libX11 refuses: on the CI runner
+        # that hope did not hold, the assertion on `available()` was never reached, and the failure
+        # surfaced several calls later as `AssertionError: None != []` from `windows()` -- a
+        # message with nothing in it about the display.
+        saved_rect, saved_width = x._stable_rect, x._text_width
+        x._DISPLAY, x._DISPLAY_FAILED = None, True
+        x._stable_rect = lambda window, timeout=0.0: None
+        x._text_width = lambda text, extent=9: None
+        try:
+            self.assertFalse(x.available(), 'a failed display must not read as available')
+            self.assertEqual(x.windows(), [])
+            self.assertEqual(x.child_windows(1), [])
+            self.assertIsNone(x.find_dialog())
+            self.assertIsNone(x.find_message_box())
+            self.assertIsNone(x.find_main_window(timeout=0.0))
+            self.assertEqual(x.button_layout({'hwnd': 1}), {})
+        finally:
+            x._stable_rect, x._text_width = saved_rect, saved_width
+            x._DISPLAY, x._DISPLAY_FAILED = None, False
+            x.available()                                 # re-ask with the real environment
 
 
 class ButtonLayoutTests(unittest.TestCase):

@@ -9,6 +9,7 @@ import sys, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import piny_view as v
+import piny_view_win32 as win32
 
 DIALOG = {'hwnd': 101, 'title': 'No Commercial-Use License | SEGGER SystemView V3.60e',
           'class': 'Qt5152QWindowIcon', 'rect': (401, 237, 1135, 627)}
@@ -128,12 +129,18 @@ class LicenseDialogTests(unittest.TestCase):
         # Decline from left to right. A press on the right-hand button (the one a naive
         # "bottom-right corner" guess reaches) DECLINES and SystemView exits rc=1, which is
         # exactly how the first attempts lost the launch. Pin the order and the geometry.
-        saved = v._text_width
-        v._text_width = lambda text, extent=v.BUTTON_FONT_PX: 8 * len(text)
+        #
+        # The Win32 backend by name, not the dispatcher: this is a MEASUREMENT of that dialog, and
+        # the X11 backend lays the buttons out from a documented fraction instead (it has no way to
+        # measure them), so it has two entries and no 'License Manager'. Asked through the
+        # dispatcher this case described whichever backend the host happened to have: green on
+        # Windows, `KeyError: 'Decline'` on the X11 CI job.
+        saved = win32._text_width
+        win32._text_width = lambda text, extent=v.BUTTON_FONT_PX: 8 * len(text)
         try:
-            layout = v.button_layout({'hwnd': 1, 'rect': (0, 0, 900, 441)}, client=(900, 441))
+            layout = win32.button_layout({'hwnd': 1, 'rect': (0, 0, 900, 441)}, client=(900, 441))
         finally:
-            v._text_width = saved
+            win32._text_width = saved
         for name, entry in layout.items():
             self.assertEqual(entry['client'], [900, 441])
             self.assertEqual(entry['span'][1] - entry['span'][0],
@@ -147,13 +154,14 @@ class LicenseDialogTests(unittest.TestCase):
 
     def test_declining_press_is_right_of_the_accepted_one(self):
         # The two verified presses from exp53, in one client space: the middle button opened
-        # the main window, the right-hand one exited the process.
-        saved = v._text_width
-        v._text_width = lambda text, extent=v.BUTTON_FONT_PX: 8 * len(text)
+        # the main window, the right-hand one exited the process. Win32 by name for the reason
+        # given above -- these coordinates are that dialog's.
+        saved = win32._text_width
+        win32._text_width = lambda text, extent=v.BUTTON_FONT_PX: 8 * len(text)
         try:
-            layout = v.button_layout({'hwnd': 1, 'rect': (0, 0, 720, 352)}, client=(720, 352))
+            layout = win32.button_layout({'hwnd': 1, 'rect': (0, 0, 720, 352)}, client=(720, 352))
         finally:
-            v._text_width = saved
+            win32._text_width = saved
         self.assertGreater(layout['Decline']['centre'][0], layout['Accept']['centre'][0])
         self.assertGreater(layout['Accept']['centre'][0], layout['License Manager']['centre'][0])
 
