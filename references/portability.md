@@ -47,6 +47,11 @@ which is correct on any Windows installation because it starts from `Path.home()
 path is read out of the profile named by `--profile`. So the machine-specific surface is exactly
 one file: `profiles/<rig>.json`.
 
+Since 2026-10-13 that file no longer has to carry the silicon facts either. A profile that states
+`"chip": "stm32f407ighx"` gets the part's CPUID, DBGMCU id address, reset-cause register and bit
+names, RAM ranges and clock from `scripts/piny_chips.py`; a second board of the same part number
+needs no new numbers, and a profile that states a value anyway still wins.
+
 ## Discovery order
 
 `doctor` and every session resolve a tool through `piny_tools.find_tool`, which tries, in order:
@@ -78,13 +83,21 @@ install-directory hit.
 
 ## What to change, and what never to copy
 
-`doctor --portable` splits the profile keys in two. This split is the part that matters, because
-one half is a migration chore and the other half is a correctness trap.
+`doctor --portable` splits the profile keys in three. This split is the part that matters, because
+one part is a migration chore, one is a correctness trap, and one is neither: those values belong to
+the part number, not to your rig.
 
 | kind | keys | meaning |
 |---|---|---|
 | `machine` | `project`, `gdb`, `openocd`, `systemview`, `jlink_gdb_server` | belong to the computer. A stale value can be relocated by discovery, and copying the wrong one is an obvious failure. |
-| `target` | `probe`, `jlink_device`, `jlink_serial`, `jlink_speed_khz`, `expected_device_id`, `idcode_address`, `freertos_tick_symbol`, `cycle_frequency_hz`, `ram_ranges` | belong to the board and the probe. **Copying these to another rig is how a plausible-looking profile produces wrong numbers.** Re-establish them there. |
+| `target` | `probe`, `jlink_device`, `jlink_serial`, `jlink_speed_khz`, `expected_device_id`, `idcode_address`, `reset_cause_address`, `reset_cause_flags`, `freertos_tick_symbol`, `cycle_frequency_hz`, `ram_ranges`, `rtt_control_block`, `rtt_control_block_symbol` | belong to the board and the probe. **Copying these to another rig is how a plausible-looking profile produces wrong numbers.** Re-establish them there. `rtt_control_block` is the one that fails silently: SystemView reuses the control-block address it remembers from the last board it recorded unless `record` pins it, so a stale value produces a recording of nothing rather than an error. |
+| `chip` | `core`, `expected_cpuid`, `expected_device_id`, `idcode_address`, `reset_cause_address`, `reset_cause_flags`, `ram_ranges`, `cycle_frequency_hz` — whichever of them the profile does not state itself | belong to the **part number**, so they are identical on every board carrying it and live in the reviewable table `scripts/piny_chips.py`, keyed by the one profile key `chip` (`stm32h723vgtx`, `stm32f407ighx`). The table only fills keys the profile omits, and `doctor --portable` labels every key's origin as `chip table` or `profile`. |
+
+Naming a `chip` the table does not know is not an error and is not a silent fallback either: the
+package says it does not recognise the part, invents no values for it (in particular it does **not**
+inherit another part's expected device id), `identify` reports the device id **without a verdict**,
+and `flash` refuses instead of defaulting. Adding a part is a table entry with a `source` string,
+not a code change.
 
 Two of the target keys deserve their own warning:
 
@@ -137,7 +150,7 @@ machine actually has; a missing tool is reported, not invented.
 
 ## What has and has not been verified
 
-- Verified: the whole test suite (183 tests) runs against temporary directories
+- Verified: the whole test suite (213 tests) runs against temporary directories
   and patched probes on both platforms, so it exercises the discovery logic without depending on
   what this machine has installed. The skipped count is a machine fact, not a constant: a plain
   Windows account skips 2 (no symlink privilege, no X display), the CI Windows runner skips 1, and
@@ -148,8 +161,10 @@ machine actually has; a missing tool is reported, not invented.
   machine with no user32 and no X display has nothing to drive: the button-shape rule lives inside
   each backend, so "the backend answered None" and "the rule found no button" are different facts
   and only one of them is a regression. `test_tools.py` covers the Windows half of discovery,
-  `test_linux.py` the Linux half (install bases, `%VAR%` expansion, SEGGER's Linux executable
-  spellings, version-less-directory preference, platform dispatch), and `test_view_x11.py` the X11
+  `test_chips.py` the silicon table (each entry against the board reading or the firmware source,
+  and the two families' reset-cause registers actually differing), `test_linux.py` the Linux half
+  (install bases, `%VAR%` expansion, SEGGER's Linux executable spellings, version-less-directory
+  preference, platform dispatch), and `test_view_x11.py` the X11
   licence-dialog backend.
 - Verified: `doctor --portable` on the development rig reports every tool from `profile` with
   `usable: true`; and a deliberately broken profile — `D:/code/PinyCore`, GDB and

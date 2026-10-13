@@ -136,7 +136,8 @@ class RecordTests(unittest.TestCase):
         # capture is already gone, so it can never be analyzed as this run's result.
         with self.assertRaises(FileNotFoundError):
             t.systemview_record(Path('definitely-not-systemview.exe'),out,1.0,
-                                auto_accept_license=False,timeout=5.0,control_port=t.free_port())
+                                auto_accept_license=False,timeout=5.0,control_port=t.free_port(),
+                                device='STM32H723VG')
         self.assertFalse((out/'live.svdat').exists())
         self.assertFalse((out/'contexts.csv').exists())
 
@@ -234,13 +235,109 @@ class RecordTests(unittest.TestCase):
                     recording,meta=t.systemview_record(Path('SystemView.exe'),
                                                        Path('artifacts')/'board-run3',1.0,
                                                        auto_accept_license=True,timeout=30.0,
-                                                       control_port=t.free_port())
+                                                       control_port=t.free_port(),
+                                                       device='STM32H723VG')
             finally:
                 os.chdir(previous)
             self.assertEqual(recording,out.resolve()/'live.svdat')
             self.assertTrue(recording.is_file())
             self.assertTrue(any(c.startswith('-save') for c in commands),commands)
             self.assertEqual(meta['bytes'],9)
+            # The recorder is told which device to attach to, so the name it was given has to
+            # survive into both the command line and the metadata a capture is judged by.
+            self.assertEqual(meta['device'],'STM32H723VG')
+            self.assertIn('-device',meta['command']);self.assertIn('STM32H723VG',meta['command'])
+
+    def test_the_recorder_is_told_where_the_control_block_is(self):
+        """SystemView does not search for the RTT control block unless it is asked to.
+
+        It remembers a recorder configuration in its own ini (`[Recorder]`, then
+        `J-Link\\RDG_RTT_MODE=Address` and `J-Link\\TXT_RTT_CB_LOCATION`), and a command line
+        that names neither option leaves that remembered address in force. Measured on this
+        rig: the remembered address was the H723's, so the first recording of the F407 board
+        produced no file at all - the recorder read RAM that holds no control block on that
+        part, never opened a channel, never sent the target its start command, and exited 1.
+        """
+        command=t.recorder_command(Path('SystemView.exe'),'STM32F407IG',24000,0x200043cc)
+        self.assertIn('-rttcbaddr',command)
+        self.assertIn('0x200043cc',command)
+        self.assertNotIn('-rttcbrange',command)
+        self.assertEqual(command[command.index('-device')+1],'STM32F407IG')
+        self.assertEqual(command[command.index('-speed')+1],'24000')
+        self.assertEqual(command[command.index('-if')+1],'SWD')
+
+    def test_an_unknown_control_block_address_is_searched_for(self):
+        """Naming neither option is the failure mode; the search is the fallback."""
+        command=t.recorder_command(Path('SystemView.exe'),'STM32F407IG',24000)
+        self.assertIn('-rttcbrange',command)
+        self.assertIn('auto',command)
+        self.assertNotIn('-rttcbaddr',command)
+
+    def test_the_control_block_address_comes_from_the_profile_or_the_elf(self):
+        self.assertEqual(t.rtt_control_block({'rtt_control_block':'0x200043CC'}),(0x200043cc,'profile'))
+        with mock.patch.object(t,'symbol_from_elf',return_value='0x20004fc0'):
+            self.assertEqual(t.rtt_control_block({'project':'somewhere'}),(0x20004fc0,'elf:_SEGGER_RTT'))
+        with mock.patch.object(t,'symbol_from_elf',return_value=None):
+            self.assertEqual(t.rtt_control_block({'project':'somewhere'}),(None,'search'))
+        # The stated symbol is the one looked up, and a profile value beats the ELF.
+        with mock.patch.object(t,'symbol_from_elf',return_value=None) as asked:
+            t.rtt_control_block({'rtt_control_block_symbol':'_SEGGER_RTT'})
+            self.assertEqual(asked.call_args[0][1],'_SEGGER_RTT')
+        with mock.patch.object(t,'symbol_from_elf',return_value='0x20004fc0') as asked:
+            self.assertEqual(t.rtt_control_block({'rtt_control_block':'0x200043cc'})[0],0x200043cc)
+            asked.assert_not_called()
+        for bad in ('somewhere',True):
+            with self.assertRaises(ValueError):t.rtt_control_block({'rtt_control_block':bad})
+
+    def _record_with(self,recorded,seconds=5.0,control_block=(0x200043cc,'elf:_SEGGER_RTT')):
+        """Drive record() with the recorder and the export analysis stubbed out."""
+        seen={}
+        def fake_record(executable,out,secs,**kwargs):
+            seen.update(kwargs)
+            return Path(out)/'live.svdat',{}
+        summary={'recorded_seconds':recorded,'quality':{'issues':[],'usable':True},
+                 'trace_busy_percent':10.0,'recording_meta':{}}
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(t,'tool_path',return_value=Path('SystemView.exe')), \
+                 mock.patch.object(t,'rtt_control_block',return_value=control_block), \
+                 mock.patch.object(t,'systemview_record',side_effect=fake_record), \
+                 mock.patch.object(t,'analyze',return_value=summary):
+                summary,ok=t.record({'project':d,'_tools':{}},d,seconds)
+        return summary,ok,seen
+
+    def test_record_pins_the_control_block_it_resolved(self):
+        _,_,seen=self._record_with(6.0)
+        self.assertEqual(seen['rtt_control_block'],0x200043cc)
+
+    def test_the_window_allows_the_measured_attach_latency(self):
+        """A short window comes back longer by the recorder's attach latency.
+
+        Measured on the F407 (5 s requested, 10.68 s of trace) and on the H723 (6 s -> 11.7 s,
+        10 s -> 16.1 s): the target starts recording while the host is still attaching the RTT
+        channel, so the request is a floor rather than the whole span. The first version of
+        this guard allowed only up to twice the request, which rejected a whole 5 s capture at
+        10.68 s (loads summing to 100.0 %, no overflow) - a gate that rejects a good recording
+        is a defect in the gate, and the allowance is now the measured one.
+        """
+        self.assertEqual(self._record_with(10.68)[0]['quality']['issues'],[])
+        self.assertEqual(self._record_with(5.0)[0]['quality']['issues'],[])
+        self.assertIn('recorded_duration_differs_from_requested_window',
+                      self._record_with(4.0)[0]['quality']['issues'])
+        self.assertIn('recorded_duration_differs_from_requested_window',
+                      self._record_with(13.0)[0]['quality']['issues'])
+
+    def test_recording_refuses_to_guess_the_device(self):
+        """A missing device name must fail, not fall back to one board's part number.
+
+        The old fallback was worse than an error: SystemView accepts the name, attaches to
+        whatever probe is there, and produces a recording whose metadata names a board it was
+        never told about -- so a capture of the wrong part looks like a successful one.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ValueError) as caught:
+                t.systemview_record(Path('SystemView.exe'),Path(d),1.0)
+            self.assertIn('jlink_device',str(caught.exception))
+            self.assertFalse((Path(d)/'live.svdat').exists())
 
 
 class FakeProcess:

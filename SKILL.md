@@ -53,6 +53,20 @@ python $tool doctor --portable
 
 两个入口的分工：`piny_debug.py` 是**探针/目标**侧（`doctor` / `license-check` / `identify` / `registers` / `flash` / `capture`），`piny_trace.py` 是**跟踪**侧（只有 `analyze` / `compare` / `record`）。写命令前先 `-h` 确认，别把 `capture` 或 `doctor` 记到 `piny_trace.py` 上。
 
+### 加一块新芯片：profile 里只写一个 `chip`
+
+芯片相关的常量（CPUID、DBGMCU 器件号与地址、复位原因寄存器与位名、RAM 区间、主频）集中在 `scripts/piny_chips.py` 的 `CHIPS` 表里，**不写在脚本逻辑里**。当前有 `stm32h723vgtx` 与 `stm32f407ighx` 两项，每项的 `source` 字段写明这些数字是从哪个项目文件读出来的（H723 的几项还有实板读数佐证）。
+
+```jsonc
+// profiles/pinycore-f407.json —— 换型号时唯一必须写的目标键
+{ "chip": "stm32f407ighx", "probe": "jlink", "jlink_serial": "…", "elf": "build/PinyCore.elf", … }
+```
+
+- 表**只填 profile 没写的键**（`setdefault`）：profile 里写了的永远以 profile 为准，`doctor --portable` 会逐键标出这一项来自 `chip table` 还是 `profile`。
+- **未知型号不是错误**：指名一个表里没有的 `chip`，只是拿不到表的取值，脚本会说明"不在本包认识范围内"，并且**不会**继承任何别的型号的期望器件号；此时 `identify` 对身份**不给结论**，`flash` 直接拒绝（"set `chip` to one of …"），而不是默认放行。
+- `identify` 还会读 `SystemCoreClock` 并与 profile 的 `cycle_frequency_hz` 对照：分频写错只会让所有 CPU 负载按同一个比例缩放，不会报错，所以这里要主动比一次。
+- **同一颗 SoC 的两个工程会写同一个 `build/PinyCore.elf`**（本项目 H723 与 F407 的构建产物同名同路径）：因此挡住烧错片子的不是 ELF 名字，而是 `flash` 前的身份闸门（F407 `DEV_ID 0x413` vs H723 `0x483`）。
+
 ### 只读连通性检查
 
 ```powershell
@@ -67,9 +81,9 @@ python $tool license-check
   - tick 在动 → 该核本来在运行（是本次连接把它停下的），已自动恢复运行；`state_at_entry/state_at_exit` 报 `running`，并在 `dhcsr_note`/`notes` 里写明 DHCSR 不可信。
   - tick 不动 → 该核确实是停止的，保持原状不写任何寄存器，`notes` 说明 `--resume-if-halted` 可启动它。
 - J-Link 会话**无法**报告“连接前的状态”（OpenOCD 的 `state_at_connect` 在 `init` 内采样，J-Link 没有对应物），所以不能用寄存器区分“本来就是停止的”和“被本次连接停下的”——上面这个 tick 探测就是用来区分二者的。
-- `freertos_tick_symbol` 是**该镜像的地址**（当前 `0x20007e5c`）。**它可以不写**：缺省时由 `arm-none-eabi-nm` 从 profile 的 ELF 解析 `xTickCount`，所以重新构建后不必手工改 profile（写了则以 profile 为准）。解析不到（没有 ELF、gdb 旁没有 `arm-none-eabi-nm`、或镜像里没有该符号）时 `liveness.checked=false`，脚本明确说“未验证”，不会假装 running。
+- `freertos_tick_symbol` 是**该镜像的地址**（每次重建都可能变）。**它可以不写**：缺省时由 `arm-none-eabi-nm` 从 profile 的 ELF 解析 `xTickCount`，所以重新构建后不必手工改 profile（写了则以 profile 为准）。解析不到（没有 ELF、gdb 旁没有 `arm-none-eabi-nm`、或镜像里没有该符号）时 `liveness.checked=false`，脚本明确说“未验证”，不会假装 running。
 - **读 tick 前必须先让核跑起来**：J-Link GDB server 的**首次内存读**返回 attach 时的调试缓存值。实测同一会话两次读间隔 4 s（中间无运行控制）得到同一个 `213916`，而板子确实在跑；`monitor go` 之后同一地址连续三次读是 `217714/217715/217716`（无任何延时），说明问题在缓存而不在时间。所以 `probe_liveness`/`tick_advances` 的顺序是 `resume()` → 读 → 睡 → 读，不能改成「先读再 resume」——那样比较的是同一个陈旧值的两份拷贝。一般教训：**别用「隔一段时间的两次读」证明东西在动**，除非确认第一次不是缓存样本。
-- `--reset-cause` 额外读 `RCC_RSR`（属于外设，故必须同时给 `--allow-peripheral-read`）。注意该寄存器**读清零**：这一次读取会消耗掉复位历史，之后无法追溯；它说明的是“上次复位原因”，不是“此刻是否被按住”。
+- `--reset-cause` 额外读该型号的复位原因寄存器（H723 是 `RCC_RSR` `0x58024cd0`，F407 是 `RCC_CSR` `0x40023874`，位名完全不同，所以由型号表给），属于外设，故必须同时给 `--allow-peripheral-read`。注意该寄存器**读清零**：这一次读取会消耗掉复位历史，之后无法追溯；它说明的是“上次复位原因”，不是“此刻是否被按住”。profile 既没写 `chip` 也没写 `reset_cause_address` 时脚本**不猜**——读错家族的寄存器是在破坏状态。
 - 进入时 CPU 已暂停时，脚本保持暂停并在 `notes` 里说明；要让它跑起来用 `--resume-if-halted`（也可用 `--leave-halted` 显式表达保持暂停）。
 - 目标状态在本命令内发生变化时，`notes` 会出现 `WARNING: target state changed during this command (halted -> running)`，以 `state_at_entry`/`state_at_exit` 为准。
 - `license-check` 只在 SEGGER 自带样例上验证 SystemView 授权对话框能被自动应答，不接触目标板。
@@ -115,7 +129,7 @@ python $trace record --output artifacts\board-run8b --seconds 10 --speed 12000
 python $trace record --output artifacts\board-run8c --seconds 10 --allow-overflow
 ```
 
-`record` 让 SystemView 自己扫 RAM 找 RTT 控制块并按名字用 `SysView` 通道（不写死 `-rttcbaddr`，因此不依赖某次固件布局）。录制动作由 SystemView 通过目标的下行通道向 SEGGER SystemView 发 Start/Stop，并随之更新 RTT 读指针：这**会写目标**，汇报时必须说明。目标上若已有 SystemView 会话在录制，则拒绝接管。
+`record` 每次都**显式告诉 SystemView 控制块在哪**（`-rttcbaddr 0x…`），因为 SystemView 不会自己去搜：它把上次录制那块板的地址记在 `%APPDATA%\SEGGER\SEGGER SystemView.ini` 的 `[Recorder]`（`J-Link\RDG_RTT_MODE=Address`、`J-Link\TXT_RTT_CB_LOCATION=0x20004FC0`），命令行不给 `-rttcbaddr`/`-rttcbrange` 时它**直接读那个记下来的地址**——换到 F407 时它照着 H723 的地址读一段没有 `SEGGER RTT` 的内存，永远不打开 `SysView` 通道、也永远不给目标发 start（`_SYSVIEW_Globals.EnableState` 停在 0），`-save` 写不出文件、退出码 1，而它自己的错误框在 V3.60e 里是坏的（`No such method MainWindow::OnError`），所以失败完全静默。地址解析顺序：profile 的 `rtt_control_block` → ELF 里的 `_SEGGER_RTT`（符号名可用 `rtt_control_block_symbol` 改）→ 都没有才退回 `-rttcbrange auto` 让 SystemView 搜；实际用了哪个写在 `recording_meta.rtt_control_block` 与 `rtt_control_block_source` 里，命令行原样留底在 `<out>/systemview-record.log`。录制动作由 SystemView 通过目标的下行通道发 Start/Stop，并随之更新 RTT 读指针：这**会写目标**，汇报时必须说明。目标上若已有 SystemView 会话在录制，则拒绝接管。
 
 流程与实测：应答 `No Commercial-Use License` 模态框 → 等控制端口 `localhost:19050` 应答（约 8 s）→ `-start` → 等 `--seconds` → `-stop`（排空实测 ~16 s）→ `-save`（写盘约 38 s）→ SystemView 原生导出 CSV → 质量门。整轮实测 63 s（`artifacts/board-run7/systemview-record.log`）。
 
@@ -129,7 +143,7 @@ python $trace record --output artifacts\board-run8c --seconds 10 --allow-overflo
 
   速率不够时 1 KB 的 SysView RTT 缓冲被填满、事件被丢掉：Idle 被低估、busy 被高估。**不要为了凑一次“成功”调低速率**，要看负载合计。profile 的 `jlink_speed_khz` 已定为 24000，`--speed` 只用于排查。
 - 必须看 `quality.context_load_sum` 与 `overflow_events`；`quality.usable=false` 时不得把数字当性能基线。`--allow-overflow` 只是让脚本明确记录“这些是低估”，不是让门通过。
-- 记录窗口一定比请求的长：`-start` 时目标 RTT 缓冲里还压着数据，实测请求 6 s 得到 ~11.8 s 跟踪、请求 10 s 得到 15.3–16.1 s。质量门接受 `请求时长 ≤ 记录时长 ≤ 2 × 请求时长`。
+- 记录窗口一定比请求的长：`-start` 时目标 RTT 缓冲里还压着数据，而且 `-start` 的应答要等采集器把 RTT 通道接上才回来（实测 `-start` 落在 8.32 s、`-stop` 落在 21.34 s，其间 `time.sleep(5)` 却过了 13.02 s）。实测请求 6 s 得到 ~11.8 s、请求 10 s 得到 15.3–16.1 s、F407 请求 5 s 得到 10.68 s，即大约 5.7–6.1 s 的 attach 延迟。质量门接受 `请求时长 ≤ 记录时长 ≤ 请求时长 + ATTACH_ALLOWANCE_SECONDS(7.0)`（比早先的 `2 × 请求时长` 对长窗口更严：21 s 窗口从允许 42 s 收到 28 s）。**一次把完整记录判成不合格的闸门本身就是缺陷**——第一次成功的 F407 采集就是被旧的 `2 ×` 规则挡下来的（负载求和 100.0 %、零丢弃、有 `Start` 事件）。
 - `-save` 必须给**绝对路径**且不能加引号。SystemView 不按调用者的工作目录解析：实测 `-save artifacts\board-run2\live.svdat` 一个字节都没写，2 s 后弹出 `SystemView Error`；同一次运行改用绝对路径写出 2296373 字节。
 - `LoadDataOnStart` 每次运行前改成 `false`、结束还原（备份 `SEGGER SystemView.ini.pinycore-record-backup`）。开着它时 SystemView 启动即载入最近一次记录，采集失败时 `-save` 会把那份旧文件当成本次结果写出来——实测写出与 SEGGER 样例字节数完全相同的文件，**看起来完全像成功**。
 - 每一步（时间戳、命令、应答）、退出码、`ini_restored`、被应答的对话框都写进 `<out>/systemview-record.log`；SystemView 自身的输出写到 `systemview-record-console.log`（它在应答控制端口前就退出时，原因只出现在这里）。系统信息/错误类弹窗由监督线程按形状找按钮点掉（Qt 自绘文字读不到，只能截图确认），次数记在 `message_boxes`。`System Information`“43466 Events Loaded.”这类弹窗是提示不是错误。
@@ -179,9 +193,10 @@ python $tool doctor --profile profiles\my-rig.json --write-profile profiles\my-r
 - 平台差异集中在两个地方，命令与报告结构在两平台上一致：工具发现（Linux 走 `piny_linux.py`：`/opt/SEGGER/JLink*`、`/usr/bin`、`~/.local/bin`，并认识 SEGGER 在 Linux 上的名字 `JLinkGDBServerCLExe`）与许可证模态框后端（`piny_view_win32.py` / `piny_view_x11.py`）。
 - 查不到时不再抛 `FileNotFoundError: [WinError 2] 系统找不到指定的文件`（那种报错既不说哪个键、也不说哪个工具），而是：`Profile key "gdb" points at ... which is not a file on this machine. Set it to the right path in <profile>. Found one here instead: ... -- run "doctor" to see the full list.`
 - `doctor` 同时检查 `project` 目录与其中的 ELF，并把每个问题写成一句可执行的话（`problems[]`）。`usable` 只在必需工具与项目目录都在时为 true。
-- `--portable` 把 profile 的键分成两类，**这个区分是迁移时最容易出错的地方**：
+- `--portable` 把 profile 的键分成三类，**这个区分是迁移时最容易出错的地方**：
   - `machine`（`project`/`gdb`/`openocd`/`systemview`/`jlink_gdb_server`）：属于这台电脑，可以从旧机器抄错、也可以被探测重新定位。
-  - `target`（`probe`/`jlink_device`/`jlink_serial`/`jlink_speed_khz`/`expected_device_id`/`idcode_address`/`freertos_tick_symbol`/`cycle_frequency_hz`/`ram_ranges`）：属于板子和探针。**抄到另一套硬件上正是"看起来正常的 profile 给出错误数字"的来源**，必须在新机器上重新确认而不是沿用。
+  - `target`（`probe`/`jlink_device`/`jlink_serial`/`jlink_speed_khz`/`expected_device_id`/`idcode_address`/`reset_cause_address`/`reset_cause_flags`/`freertos_tick_symbol`/`cycle_frequency_hz`/`ram_ranges`）：属于板子和探针。**抄到另一套硬件上正是"看起来正常的 profile 给出错误数字"的来源**，必须在新机器上重新确认而不是沿用。
+  - `chip`（型号键：`core`/`expected_cpuid`/`expected_device_id`/`idcode_address`/`reset_cause_address`/`reset_cause_flags`/`ram_ranges`/`cycle_frequency_hz` 这些**只取决于型号**的值，由 `chip` 这一个键名指出来）：**同一型号的所有板子都一样**，所以住在 `scripts/piny_chips.py` 的可审查表里，不必每块板抄一遍；`doctor --portable` 会给每个键标出来源是 `chip table` 还是 `profile`。
 - `jlink_serial` **缺失时只报告、绝不猜**：多探针同时在线时，替你挑一个等于替你改变目标。
 - `freertos_tick_symbol` 现在**可以不写**：缺省时用 `arm-none-eabi-nm` 从 profile 指向的 ELF 里解析 `xTickCount`，因此重新构建后地址变化不再需要手工维护。写了则以 profile 为准（用于故意监视另一个镜像）。解析不到时 liveness 报 `checked:false`，即"未验证"，不会假装 running。
 - 严格模式：`load_profile(..., discover_tools=False)`（或直接不给 `_tools`）只用 profile 原值，便于复现问题或在受控机器上定位。
@@ -214,11 +229,11 @@ python -X utf8 tools\smoke_doctor.py              # 只用示例 profile 能否�
 - `tools\check_repo.py` 是防文档腐烂的闸门，它检查的不是"文件在不在"这一件事：`PACKAGE_FILES` 里声明的文件都被 `STATUS.md`/`README.md` 点到名，且 `scripts`/`tests`/`tools` 下**每个 `*.py` 都必须被声明过**（新模块漏声明就直接失败——文件地图就是这样悄悄过期的）；文档里写的子命令确实属于它提到的那个脚本（`doctor`/`capture` 只在 `piny_debug.py`，`piny_trace.py` 只有 `analyze`/`compare`/`record`）；示例 profile 合法且不含真实路径；`profiles/pinycore.json` 没被跟踪；**四份文档里的测试基线数字与 `unittest discover` 实际跑出来的一致**（所以改完测试要同步 `SKILL.md`、`STATUS.md`、`README.md`、`references/pinycore.md`）；`--tag` 与 `scripts/piny_debug.py` 的 `__version__` 一致。
 - 版本只有一处真源：`scripts/piny_debug.py` 的 `__version__`（`piny_trace.py` 从它导入）。发版走 tag：`.github/workflows/release.yml` 在 `v*.*.*` tag 上先校验 tag 与 `__version__` 一致、单测通过，再打包源码 zip + `SHA256SUMS` 发 Release；**tag 与 `__version__` 必须在同一个提交里改**。
 - CI 有三个 job：`tests`（Ubuntu + Windows × Python 3.10/3.13）、`x11`（Ubuntu + Xvfb，断言 `libX11`/`libXtst`/`libXft` 加载成功且后端确实是 `piny_view_x11`）、`repo-checks`（上面三个自检脚本）——**都不需要探针、板子和 SEGGER 安装**。这也是一条设计约束：任何新检查都不要引入这些依赖，也不要引入 pip 依赖（本包只用标准库）。
-- 平台条件是**按能力判断，不是按 `sys.platform`**：`test_view.py` 的模态框与按钮识别用例在 `piny_view.available()` 为真时运行（Windows 有 user32、Linux 有 X display 都算），只有两者都没有时才跳过——按钮识别规则住在两个后端里，没有后端时 `find_default_button` 返回的 None 是"没得问"，不是"没找到按钮"，这两种情况必须分开；Windows 专属的用例（内置安装目录词表的 `%VAR%` 展开、注册表、只描述内置遍历的探测用例）用 `pt.inventory() is None` 守卫，也就是"本机确实走的是内置遍历"，而不是把平台名写死。这样两个平台跑到的用例数一致（183），跳过的个数不同，而且这个数字是**本机事实**：普通 Windows 账户没有创建符号链接的权限所以跳过该用例（`skipped=2`），CI 的 Windows runner 有该权限所以运行它（`skipped=1`），Linux 上则换一批跳过（没有 Windows 安装目录词表与注册表，且按有没有 X display 决定模态框与按钮识别用例）。跳过的是"这台机器上根本没有的东西"，而不是藏起跑不过的断言。
+- 平台条件是**按能力判断，不是按 `sys.platform`**：`test_view.py` 的模态框与按钮识别用例在 `piny_view.available()` 为真时运行（Windows 有 user32、Linux 有 X display 都算），只有两者都没有时才跳过——按钮识别规则住在两个后端里，没有后端时 `find_default_button` 返回的 None 是"没得问"，不是"没找到按钮"，这两种情况必须分开；Windows 专属的用例（内置安装目录词表的 `%VAR%` 展开、注册表、只描述内置遍历的探测用例）用 `pt.inventory() is None` 守卫，也就是"本机确实走的是内置遍历"，而不是把平台名写死。这样两个平台跑到的用例数一致（213），跳过的个数不同，而且这个数字是**本机事实**：普通 Windows 账户没有创建符号链接的权限所以跳过该用例（`skipped=2`），CI 的 Windows runner 有该权限所以运行它（`skipped=1`），Linux 上则换一批跳过（没有 Windows 安装目录词表与注册表，且按有没有 X display 决定模态框与按钮识别用例）。跳过的是"这台机器上根本没有的东西"，而不是藏起跑不过的断言。
 
 ## 验收和汇报
 
-1. 跑 `tests/` 中的单元测试（在工作区源码包内），再做本次涉及的实际路径检查。当前基线：`python -X utf8 -m unittest discover -s tests -t tests` → 183 tests, OK（本机 Windows 账户 `skipped=2`，CI 的 Windows runner `skipped=1`，Linux 上跳过的是另一批；**断言看用例数与失败数，不要照抄 skipped 的数字**）。`tests/test_tools.py` 与 `tests/test_linux.py` 覆盖可迁移性：路径优先级、PATH/安装目录/注册表探测、按文件身份去重、缺失工具的报错文案、`--write-profile` 的合并与"不点名就不写"、machine/target 分类，以及 Linux 侧的安装目录/可执行文件名/版本号目录优先级/平台分派；`tests/test_view_x11.py` 覆盖 X11 后端的几何、按钮识别、降级阶梯与 Xlib 错误处理器（libX11 对未处理协议错误是 `exit()`，不是异常）。这些用例全部在临时目录或打桩下运行，**不依赖本机装了什么**。
+1. 跑 `tests/` 中的单元测试（在工作区源码包内），再做本次涉及的实际路径检查。当前基线：`python -X utf8 -m unittest discover -s tests -t tests` → 213 tests, OK（本机 Windows 账户 `skipped=2`，CI 的 Windows runner `skipped=1`，Linux 上跳过的是另一批；**断言看用例数与失败数，不要照抄 skipped 的数字**）。`tests/test_tools.py` 与 `tests/test_linux.py` 覆盖可迁移性：路径优先级、PATH/安装目录/注册表探测、按文件身份去重、缺失工具的报错文案、`--write-profile` 的合并与"不点名就不写"、machine/target/chip 分类，以及 Linux 侧的安装目录/可执行文件名/版本号目录优先级/平台分派；`tests/test_chips.py` 覆盖型号表本身（条目与实板读数/固件源码对齐、CPUID 与复位原因解码、两个家族的复位寄存器确实不同）；`tests/test_view_x11.py` 覆盖 X11 后端的几何、按钮识别、降级阶梯与 Xlib 错误处理器（libX11 对未处理协议错误是 `exit()`，不是异常）。这些用例全部在临时目录或打桩下运行，**不依赖本机装了什么**。
 2. 存在文件、非空数据、原生导出成功、目标实际状态分别核验。MCP 如未来加入，还需握手/工具枚举；不以注册成功代替执行验证。
 3. 汇报：实际读取/采集结果、配置/固件标识、数据来源、目标恢复状态、失败/覆盖限制、日志路径。不要把官方样例负载标为 PinyCore 实测。
 4. 扩展从 `profiles/*.json` 和执行器接口入手，避免为第二个项目复制一套逻辑。新增探针或 RTOS 必须有独立验证，之后再考虑薄 MCP 封装。

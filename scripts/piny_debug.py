@@ -20,13 +20,19 @@ import threading
 import time
 import uuid
 
+# The chip facts live in a sibling module rather than in this one, because "which silicon is
+# this" is knowledge the package owns and tests, while everything else in a profile is the
+# machine's and the rig's. Imported by bare name: the scripts directory is on sys.path for every
+# entry point this package ships (the two CLI scripts, the tests, tools/check_repo.py).
+import piny_chips
+
 ROOT = Path(__file__).resolve().parents[1]
 HIDDEN = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
 
 # Kept in step with the release tag by .github/workflows/release.yml, which refuses to publish a
 # tag that disagrees with the scripts shipped under it. Bump this in the same commit as any
 # behaviour change worth a tag; a version that only lives in the README is a version nobody reads.
-__version__ = '0.2.1'
+__version__ = '0.3.0'
 
 
 def parse_mi(line):
@@ -122,7 +128,15 @@ def stop_process(proc):
 class OpenOCD:
     def __init__(self,profile,out,adapter_khz=None):
         self.profile=profile;self.out=Path(out);self.proc=None;self.sock=None;self.log=None
-        self.adapter_khz=int(adapter_khz or profile['adapter_khz']);self.state_at_connect=None
+        # The adapter speed is a per-rig fact that decides whether SWD works at all: too fast for
+        # a given cable shows up as intermittent failures to connect, not as an error, so a
+        # missing value is refused rather than left to OpenOCD's per-driver default.
+        rate=adapter_khz if adapter_khz is not None else profile.get('adapter_khz')
+        if rate is None:
+            raise RuntimeError('No adapter speed: the profile states no "adapter_khz" and none was '
+                               'passed on the command line. It is not defaulted, because the rate a '
+                               'rig tolerates is a property of the board and the cable.')
+        self.adapter_khz=int(rate);self.state_at_connect=None
         self.gdb_port=free_port();self.tcl_port=free_port()
         while self.tcl_port==self.gdb_port:self.tcl_port=free_port()
     def __enter__(self):
@@ -524,9 +538,20 @@ def load_profile(path,discover_tools=True):
     is strictly more useful than failing with an OS error, and because it only ever substitutes
     a tool the machine actually has. Pass ``discover_tools=False`` for a strict run that uses
     the profile exactly as written.
+
+    A profile that names a ``chip`` also gets that chip's facts filled in underneath it (see
+    :mod:`piny_chips`). That direction matters: the table supplies what the profile did not say,
+    so a rig whose part really does differ keeps its own measured values, and adding a second
+    board to a bench stops meaning "write out nine more magic numbers correctly".
     """
     source=Path(path)
     p=json.loads(source.read_text(encoding='utf-8-sig'))
+    applied,filled=piny_chips.apply_chip(p)
+    p['_chip']=applied
+    # Which values the chip table supplied rather than the profile. Kept so `doctor` can label
+    # them: an inferred address presented as if the profile had stated it is the kind of detail
+    # that turns a five-minute migration into an afternoon.
+    p['_chip_filled']=filled
     p['_elf']=Path(p['project'])/p['elf']
     p['_profile_path']=str(source)
     p['_tools']={}
@@ -618,8 +643,21 @@ def check_target(backend,p):
 
     Takes the backend of either probe (``OpenOCD`` or ``JLinkGDBServer``/``GDB``): this is the
     last gate before Flash is written, so it must work under the SEGGER probe too.
+
+    Both halves of the comparison must be stated. A profile that names a chip gets them from the
+    table; one that names neither a chip nor the two keys stops here with the key names, because
+    an identity gate that answers "no expectation" by flashing anyway is not a gate.
     """
-    address=int(p['idcode_address'],0);expected=int(p['expected_device_id'],0)
+    facts=target_facts(p)
+    missing=[key for key in ('idcode_address','expected_device_id')
+             if facts[key] is None]
+    if missing:
+        raise RuntimeError('Cannot check the target identity: the profile states no '
+                           +' and no '.join('"'+key+'"' for key in missing)
+                           +' and names no chip this package knows. Set "chip" to one of '
+                           +', '.join(piny_chips.chip_names())
+                           +', or give both keys directly, before flashing.')
+    address=facts['idcode_address'];expected=facts['expected_device_id']
     if isinstance(backend,OpenOCD):
         raw=int(backend.command(f'read_memory {address:#x} 32 1').strip(),0)
     else:
@@ -675,18 +713,19 @@ def _state_after(build,seconds=6.0):
     return state
 
 
-def tick_symbol_from_elf(profile):
-    """Resolve the FreeRTOS tick counter out of the ELF, so a profile need not hard-code it.
+def symbol_from_elf(profile,name):
+    """Resolve one symbol's address out of the ELF the profile names, or None.
 
-    ``xTickCount`` is a static in the image, so its address moves on every rebuild: a profile
-    that carries the address is a profile that silently reads the wrong word after the next
-    build. Resolving it from the symbols of the image the profile already names removes that
-    whole class of mistake, and a profile value still wins when it is set, because a user who
-    wrote an address deliberately may be reading a different image on purpose.
+    ``xTickCount`` and ``SystemCoreClock`` are both statics in the image, so their addresses move
+    on every rebuild: a profile that carries an address is a profile that silently reads the
+    wrong word after the next build. Resolving them from the symbols of the image the profile
+    already names removes that whole class of mistake, and a profile value still wins where one
+    is set, because a user who wrote an address deliberately may be reading a different image on
+    purpose.
 
     Returns a ``0x...`` string or None. Every failure path returns None: a missing toolchain,
-    a stripped image, or a symbol that is not there must degrade to "liveness not checked",
-    never to an exception in the middle of a flash.
+    a stripped image, or a symbol that is not there must degrade to "not checked", never to an
+    exception in the middle of a flash.
     """
     elf=(profile or {}).get('_elf')
     if not elf:return None
@@ -711,10 +750,15 @@ def tick_symbol_from_elf(profile):
     # local. xTickCount is a file-scope static in tasks.c, so 'b' is the expected type.
     for line in cp.stdout.splitlines():
         parts=line.split()
-        if len(parts)>=3 and parts[2].split('(')[0].strip()=='xTickCount':
+        if len(parts)>=3 and parts[2].split('(')[0].strip()==name:
             try:return hex(int(parts[0],16))
             except ValueError:continue
     return None
+
+
+def tick_symbol_from_elf(profile):
+    """Address of FreeRTOS's ``xTickCount`` in this profile's image, or None."""
+    return symbol_from_elf(profile,'xTickCount')
 
 
 def probe_liveness(session,seconds=1.5):
@@ -915,8 +959,10 @@ def _portability_problems(p,report,discovery):
                         ' (build the project, or point "elf" at the right image)')
     ids=p.get('idcode_address')
     if not ids:
-        problems.append('idcode_address is unset, so the device-family check before flashing '
-                        'cannot run')
+        problems.append('idcode_address is unset and the profile names no known chip, so the '
+                        'device-family check before flashing cannot run (add "chip": '
+                        +', '.join('"'+name+'"' for name in piny_chips.chip_names())
+                        +' to the profile, or give the address directly)')
     return problems
 
 
@@ -928,8 +974,11 @@ def portability_report(p,discovery,doctor_report,reference=None):
     hardware and must be re-measured rather than "fixed".
     """
     machine_keys=('project','gdb','openocd','systemview','jlink_gdb_server')
-    target_keys=('probe','jlink_device','jlink_serial','jlink_speed_khz','expected_device_id',
-                 'idcode_address','freertos_tick_symbol','cycle_frequency_hz','ram_ranges')
+    target_keys=('chip','core','probe','jlink_device','jlink_serial','jlink_speed_khz',
+                 'expected_device_id','expected_cpuid','idcode_address','reset_cause_address',
+                 'reset_cause_flags','freertos_tick_symbol','cycle_frequency_hz','ram_ranges',
+                 'rtt_control_block','rtt_control_block_symbol')
+    supplied=set(p.get('_chip_filled') or [])
     bound=[]
     for key in machine_keys:
         entry=doctor_report['tools'].get(key)
@@ -949,6 +998,7 @@ def portability_report(p,discovery,doctor_report,reference=None):
     for key in target_keys:
         if key in p:
             bound.append({'key':key,'value':p[key],'kind':'target','ok':None,
+                          'from':('chip table' if key in supplied else 'profile'),
                           'why':_TARGET_KEY_WHY.get(key,'a property of the rig, not of the machine')})
     return {'bound_keys':bound,
             'machine_keys':list(machine_keys),'target_keys':list(target_keys),
@@ -960,15 +1010,25 @@ def portability_report(p,discovery,doctor_report,reference=None):
 
 #: Why each target-side key must be re-established on a new rig rather than copied.
 _TARGET_KEY_WHY={
+    'chip':'names the silicon, which is what fills in the facts below; a profile that states them '
+           'itself and names no chip is the older, more laborious way to say the same thing',
+    'core':'the core the identity check expects to find; reported, never used as a gate',
+    'expected_cpuid':'the core this rig should report, as documented by the vendor',
     'probe':'which transport this rig uses; a SEGGER probe needs jlink, anything else needs openocd',
     'jlink_device':'the exact part number, from the board rather than from this file',
     'jlink_serial':'identifies ONE probe; a different probe has a different serial',
     'jlink_speed_khz':'measured per rig: too low silently drops trace events and understates Idle',
     'expected_device_id':'the device family the safety gate refuses to flash without',
     'idcode_address':'where that ID lives on this family',
+    'reset_cause_address':'read-to-clear, and a different address on every family',
+    'reset_cause_flags':'the bit names that address uses; the H7 and F4 names differ',
     'freertos_tick_symbol':'an address inside THIS image; it moves on every rebuild',
     'cycle_frequency_hz':'the clock SystemView divides by; wrong here scales every CPU load',
     'ram_ranges':'the memory map SystemView scans for the RTT control block',
+    'rtt_control_block':'where THIS build puts its RTT control block; SystemView otherwise reuses '
+                        'the address it remembers from the last board it recorded',
+    'rtt_control_block_symbol':'the linker symbol that address comes from; renaming it in the '
+                               'firmware moves the address',
 }
 
 
@@ -978,10 +1038,6 @@ DHCSR=0xe000edf0
 #: Debug Exception and Monitor Control Register: shows whether a vector catch or monitor is
 #: armed, which a debugger can leave behind and mistake for a target fault.
 DEMCR=0xe000edfc
-#: Cortex-M7 CPUID (ARMv7-M, r1p2) as observed on this board's Cortex-M7.
-EXPECTED_CPUID=0x411fc272
-#: Low 12 bits of STM32 DBGMCU_IDC. 0x483 is STM32H72x/H73x.
-EXPECTED_DEVICE_ID=0x483
 #: Bits of DHCSR that describe the debug state rather than the core's own operation.
 _DHCSR_BITS=((0,'C_DEBUGEN'),(1,'C_HALT'),(2,'C_STEP'),(3,'C_MASKINTS'),(17,'S_HALT'),
              (24,'S_RESET_ST'),(25,'S_RETIRE_ST'),(26,'S_LOCKUP'),(27,'S_SLEEP'),(28,'S_LOCKUP_EXT'),
@@ -992,12 +1048,40 @@ RETIRE_PROBE_SECONDS=0.25
 #: tick period on this board is 1 ms, so 1.5 s leaves ample room to be unambiguous while staying
 #: a rounding error next to a capture: a running board accumulates ~1500 ticks, a stopped one 0.
 LIVENESS_PROBE_SECONDS=1.5
-#: Reset cause register of the STM32H7 RCC (RCC base 0x58024C00 + 0x0D0). READING IT CLEARS
-#: THE FLAGS, so it is only read when the caller asks for it: the reset history is evidence
-#: and a second read cannot recover it.
-RCC_RSR=0x58024c00+0x0d0
-_RCC_RSR_BITS=((16,'PINRST'),(17,'BORRST'),(18,'SFTRST'),(19,'IWDG1RST'),(20,'WWDG1RST'),
-               (21,'LPWRRST'),(22,'D1RST'),(23,'D2RST'),(24,'CPURST'),(25,'D1D2RST'))
+
+
+def target_facts(p):
+    """The chip-dependent facts a session needs, in the form it needs them.
+
+    The chip table is applied here, on a copy, rather than being re-derived: a profile that went
+    through :func:`load_profile` has already had it applied and one built by hand (tests, tooling)
+    has not, and two resolution rules that must agree is one more than this needs. A profile that
+    states a value still wins, in both cases.
+
+    A profile that names no chip is not an error and gets no invented values: only what it states
+    is known, so ``idcode_address`` is None and the caller says so instead of reading the address
+    some other part keeps its identity register at. Every address-shaped value comes back as an
+    int or None; ``expected_cpuid`` is int or None, because a part the table has never seen has no
+    CPUID to expect and the honest answer there is to report the core that answered.
+    """
+    merged=dict(p)
+    piny_chips.apply_chip(merged)
+    def number(key):
+        value=merged.get(key)
+        if value is None:return None
+        try:return int(value,0) if isinstance(value,str) else int(value)
+        except (TypeError,ValueError):return None
+    chip=merged.get('chip')
+    flags=merged.get('reset_cause_flags') or ()
+    return {'chip':chip,
+            'chip_known':bool(chip) and piny_chips.chip_facts(chip) is not None,
+            'core':merged.get('core'),
+            'expected_cpuid':number('expected_cpuid'),
+            'expected_device_id':number('expected_device_id'),
+            'idcode_address':number('idcode_address'),
+            'reset_cause_address':number('reset_cause_address'),
+            'reset_cause_flags':tuple((int(bit),name) for bit,name in flags),
+            'cycle_frequency_hz':number('cycle_frequency_hz')}
 
 
 def decode_dhcsr(raw):
@@ -1050,7 +1134,17 @@ def identify(p,out,adapter_khz=None,resume_if_halted=None,read_reset_cause=False
         raise ValueError('--adapter-khz is an OpenOCD setting; use --speed for J-Link (kHz)')
     if speed_khz and chosen!='jlink':
         raise ValueError('--speed is a J-Link setting; use --adapter-khz for OpenOCD (kHz)')
-    _rate=int(adapter_khz or p.get('adapter_khz')) if chosen=='openocd' else int(speed_khz or p.get('jlink_speed_khz') or 4000)
+    facts=target_facts(p)
+    if facts['idcode_address'] is None:
+        raise RuntimeError('Profile has no "idcode_address" and names no known "chip", so there is '
+                           'no identity register to read. Set "chip" to one of '
+                           +', '.join(piny_chips.chip_names())+' or give the address directly in '
+                           +str(p.get('_profile_path') or 'the profile')+'.')
+    # Reported, not decided here: OpenOCD.__init__ raises the message when the rate is missing,
+    # so this only has to avoid a TypeError on the way there.
+    _rate=((adapter_khz or p.get('adapter_khz')) if chosen=='openocd'
+           else (speed_khz or p.get('jlink_speed_khz') or 4000))
+    _rate=int(_rate) if _rate is not None else None
     with ProbeLock() as _lock,make_session(p,out,adapter_khz,device,speed_khz,None,driver) as session:
         # OpenOCD samples the state inside `init`, before this function gets control, so its
         # pre-open state is exact. A J-Link session has no equivalent, and its first
@@ -1060,10 +1154,16 @@ def identify(p,out,adapter_khz=None,resume_if_halted=None,read_reset_cause=False
         state=session.state()
         result={'probe':chosen,'adapter_khz':_rate,
                 'halt_issued':False,'reset_issued':False,
-                'device_id':None,'expected_device_id':hex(EXPECTED_DEVICE_ID),
-                'matches_expected_device':None,'cpuid':None,'expected_cpuid':hex(EXPECTED_CPUID),
+                'chip':facts['chip'],'chip_known':facts['chip_known'],'core_expected':facts['core'],
+                'device_id':None,'expected_device_id':(hex(facts['expected_device_id'])
+                                                       if facts['expected_device_id'] is not None else None),
+                'matches_expected_device':None,'cpuid':None,
+                'expected_cpuid':hex(facts['expected_cpuid']) if facts['expected_cpuid'] is not None else None,
                 'dhcsr':None,'state_at_entry':state,'state_before_probe':pre_open,
                 'state_at_exit':None,'notes':[],'liveness':None}
+        if facts['chip'] and not facts['chip_known']:
+            result['notes'].append('chip '+repr(facts['chip'])+' is not one this package knows, so '
+                                   'the identity read is checked against whatever the profile states')
         if state not in ('running','halted'):
             result['state_at_exit']=state
             raise RuntimeError('Target did not answer over the debug port; state is '+repr(state)+
@@ -1108,15 +1208,37 @@ def identify(p,out,adapter_khz=None,resume_if_halted=None,read_reset_cause=False
                 else:
                     result['notes'].append('the core was left stopped and no register was written. '
                                            'Pass --resume-if-halted to start it.')
-        address=int(p['idcode_address'],0)
+        address=facts['idcode_address']
         raw=session.read_u32(address)
+        result['idcode_address']=hex(address)
         result['device_id']=hex(raw&0xfff);result['revision_id']=hex(raw>>16)
-        result['matches_expected_device']=(raw&0xfff==EXPECTED_DEVICE_ID)
-        if not result['matches_expected_device']:
-            result['notes'].append('device id is not the expected STM32H72x/H73x value')
+        # An unreported expectation is None, not False: "the profile states no device id" and "the
+        # device id is wrong" are different answers, and only the second one is a reason to refuse
+        # a flash. The gate lives in check_target, which requires the value to be present.
+        result['matches_expected_device']=(None if facts['expected_device_id'] is None
+                                           else raw&0xfff==facts['expected_device_id'])
+        if result['matches_expected_device'] is False:
+            result['notes'].append('device id is '+hex(raw&0xfff)+' but this profile expects '
+                                   +hex(facts['expected_device_id'])+' ('+str(facts['chip'])
+                                   +'); the identity gate refuses to flash until they agree')
+        elif result['matches_expected_device'] is None:
+            result['notes'].append('this profile states no expected_device_id and names no known '
+                                   'chip, so the device id '+hex(raw&0xfff)+' is reported without '
+                                   'a verdict; add "chip" to have it checked')
         cpu=session.read_u32(0xe000ed00)
         result['cpuid']=hex(cpu)
-        if cpu!=EXPECTED_CPUID:result['notes'].append('CPUID differs from the Cortex-M7 r1p2 seen previously')
+        # Named rather than compared: the CPUID is how a chip that answers on the debug port
+        # announces which core it has, and that is worth reporting even for a part this package
+        # has never seen. A mismatch against the expected value is a note, not a failure --
+        # `matches_expected_device` is the gate that protects a flash, and it reads the
+        # vendor's own device id.
+        decoded=piny_chips.describe_cpuid(cpu)
+        result['core']=decoded['core']
+        result['cpuid_decoded']=decoded
+        if facts['expected_cpuid'] is not None and cpu!=facts['expected_cpuid']:
+            result['notes'].append('CPUID is '+hex(cpu)+' ('+str(decoded['core'] or 'unrecognised')
+                                   +' '+decoded['revision']+'), not the '+hex(facts['expected_cpuid'])
+                                   +' expected for '+str(facts['core'] or facts['chip']))
         result['dhcsr']=decode_dhcsr(session.read_u32(DHCSR))
         demcr=session.read_u32(DEMCR)
         result['demcr']={'raw':hex(demcr),'vc_mmerr':bool(demcr>>4&1),'vc_nocperr':bool(demcr>>5&1),
@@ -1124,6 +1246,33 @@ def identify(p,out,adapter_khz=None,resume_if_halted=None,read_reset_cause=False
                          'vc_buserr':bool(demcr>>8&1),'vc_interr':bool(demcr>>9&1),
                          'vc_harderr':bool(demcr>>10&1),'mon_en':bool(demcr>>16&1),
                          'mon_pend':bool(demcr>>17&1),'trcena':bool(demcr>>24&1)}
+        # The clock SystemView divides its timestamps by. A wrong value here does not fail a
+        # capture, it rescales every CPU load inside one, so it is worth one read-only word:
+        # `SystemCoreClock` is a global in the image, so it is resolved from the ELF the same
+        # way the tick is, and a profile that states the address still wins.
+        clock_symbol=p.get('system_core_clock_symbol') or symbol_from_elf(p,'SystemCoreClock')
+        if clock_symbol:
+            clock=session.read_u32(int(clock_symbol,0))
+            entry={'symbol':'SystemCoreClock','address':clock_symbol,'value_hz':clock,
+                   'source':'read from the live target'}
+            expected_hz=facts['cycle_frequency_hz']
+            if expected_hz:
+                entry['profile_hz']=expected_hz
+                entry['matches_profile']=(clock==expected_hz)
+                if clock!=expected_hz:
+                    result['notes'].append('SystemCoreClock reads '+str(clock)+' Hz on the target but '
+                                           'this profile declares '+str(expected_hz)+' Hz; SystemView '
+                                           'scales every CPU load by the declared clock, so a capture '
+                                           'taken now reports percentages that are wrong by that ratio')
+            else:
+                result['notes'].append('SystemCoreClock reads '+str(clock)+' Hz on the target and the '
+                                       'profile declares no cycle_frequency_hz; set it to this value '
+                                       'or every CPU load in a capture is scaled by the wrong clock')
+            result['system_core_clock']=entry
+        elif facts['cycle_frequency_hz']:
+            result['notes'].append('the profile declares a '+str(facts['cycle_frequency_hz'])+' Hz clock '
+                                   'for SystemView but SystemCoreClock could not be resolved out of the '
+                                   'ELF, so that number was not verified against the target')
         # S_RETIRE_ST is the CPU's own progress counter: it only sets when the core executes
         # another instruction, and reading DHCSR clears it. So it tells whether the core is
         # really executing code, which a software register snapshot cannot otherwise show
@@ -1143,16 +1292,26 @@ def identify(p,out,adapter_khz=None,resume_if_halted=None,read_reset_cause=False
                 result['notes'].append(verdict['note'])
         result['notes'].append('read-only debug identity check: no halt, no reset, no Flash access')
         if read_reset_cause:
-            rsr=session.read_u32(RCC_RSR)
-            result['reset_cause']={'address':hex(RCC_RSR),'raw':hex(rsr),
-                                   'flags':{name:bool(rsr>>shift&1) for shift,name in _RCC_RSR_BITS},
-                                   'cleared_by_this_read':True,
-                                   'note':('RCC_RSR is read-to-clear: these flags are now gone. '
-                                           'IMPORTANT: it says what reset the CPU last took, not '
-                                           'whether it is being held in reset now')}
-            if rsr==0:
-                result['notes'].append('no reset flag was set in RCC_RSR, so this read cannot explain '
-                                       'the core state and a further reset history is unrecoverable')
+            rsr_address=facts['reset_cause_address']
+            if rsr_address is None:
+                # Reading a register from another family would clear ITS flags and report them as
+                # this board's, and the read is destructive, so it is refused rather than guessed.
+                result['notes'].append('--read-reset-cause was asked for, but this profile names '
+                                       'neither a chip nor a reset_cause_address, and the register '
+                                       'is read-to-clear: it is not guessed from another part')
+            else:
+                rsr=session.read_u32(rsr_address)
+                result['reset_cause']={'address':hex(rsr_address),'raw':hex(rsr),
+                                       'flags':{name:bool(rsr>>shift&1)
+                                                for shift,name in facts['reset_cause_flags']},
+                                       'cleared_by_this_read':True,
+                                       'note':('this register is read-to-clear: these flags are now gone. '
+                                               'IMPORTANT: it says what reset the CPU last took, not '
+                                               'whether it is being held in reset now')}
+                if rsr==0:
+                    result['notes'].append('no reset flag was set at '+hex(rsr_address)+', so this read '
+                                           'cannot explain the core state and a further reset history '
+                                           'is unrecoverable')
         result['state_at_exit']=session.state()
         # A core that the liveness probe just watched execute must not be relabelled "halted" by
         # the very register that was already shown to lie here -- and relabelling it would then

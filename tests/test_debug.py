@@ -523,11 +523,14 @@ class SnapshotFlowTests(unittest.TestCase):
 class IdentifyTests(unittest.TestCase):
     """The read-only SWD check must never halt, reset or flash the target."""
     def fake(self,state='running',device=0x10010483,cpuid=0x411fc272,dhcsr=0x03000011,
-             halt_on_connect=False):
+             halt_on_connect=False,f4_device=0x10010413,clock=550000000):
         """A stand-in for OpenOCD. ``read_memory`` answers the raw 32-bit registers identify reads.
 
         The device id and the CPUID must differ, because identify reads them from two different
-        addresses and compares each against its own expected value."""
+        addresses and compares each against its own expected value.
+        ``f4_device`` answers the STM32F4 idcode address, because identify takes that address from
+        the profile's chip rather than from a constant: the whole point of the chip table is that
+        a second board moves this read somewhere else."""
         class Ocd(d.OpenOCD):
             adapter_khz=500
             gdb_port=1234
@@ -548,9 +551,11 @@ class IdentifyTests(unittest.TestCase):
                 if c=='halt':self.current='halted'
                 if c.startswith('read_memory'):
                     if '0x5c001000' in c:return hex(device)
+                    if '0xe0042000' in c:return hex(f4_device)
                     if '0xe000ed00' in c:return hex(cpuid)
                     if '0xe000edf0' in c:return hex(dhcsr)
                     if '0xe000edfc' in c:return '0x1000000'
+                    if '0x20000004' in c:return hex(clock)
                     return '0x0'
                 return ''
         return Ocd()
@@ -572,11 +577,15 @@ class IdentifyTests(unittest.TestCase):
         s.halt=lambda note='halt':(backend.command('halt'),setattr(s,'halt_issued',True))[0]
         return contextlib.nullcontext(s)
     #: fake() builds the target; everything else is an identify() keyword argument.
-    TARGET_KEYS=('state','device','cpuid','dhcsr','halt_on_connect')
-    def run_identify(self,profile_extra=None,**kw):
+    TARGET_KEYS=('state','device','cpuid','dhcsr','halt_on_connect','f4_device','clock')
+    def run_identify(self,profile_extra=None,profile=None,**kw):
         target={k:kw.pop(k) for k in list(kw) if k in self.TARGET_KEYS}
         o=self.fake(**target)
-        profile={'_elf':Path('firmware.elf'),'idcode_address':'0x5c001000','expected_device_id':'0x483',
+        # The base profile states the H723 facts explicitly, which is the older way to describe a
+        # rig and must keep working. `profile=` replaces it wholesale for the cases that exercise
+        # the newer way: naming the chip and letting the table supply everything else.
+        profile=dict(profile) if profile is not None else {
+                 '_elf':Path('firmware.elf'),'idcode_address':'0x5c001000','expected_device_id':'0x483',
                  'adapter_khz':500}
         profile.update(profile_extra or {})
         session=self.session(o)
@@ -593,7 +602,62 @@ class IdentifyTests(unittest.TestCase):
     def test_unexpected_device_id_is_reported_not_hidden(self):
         o,r=self.run_identify(device=0x10010450)
         self.assertFalse(r['matches_expected_device'])
-        self.assertTrue(any('not the expected' in n for n in r['notes']))
+        # The note has to name both numbers: "the device id is wrong" without the value that
+        # answered is not something anybody can act on.
+        note=[n for n in r['notes'] if 'device id is' in n]
+        self.assertTrue(note,'an unexpected device id must be reported in the notes')
+        self.assertIn('0x450',note[0]);self.assertIn('0x483',note[0])
+    def test_a_second_chip_is_one_profile_key(self):
+        """A profile that only names the F407 gets the whole identity check.
+
+        This is what the chip table exists for. The device id, the idcode address and the core
+        were module constants describing one H723, so the second board on the same bench was
+        rejected by the first board's check -- and the only way to add it was to edit code.
+        """
+        o,r=self.run_identify(profile={'_elf':Path('firmware.elf'),'chip':'stm32f407ighx',
+                                       'adapter_khz':500},
+                              device=0x10010413,cpuid=0x410fc241)
+        self.assertEqual(r['chip'],'stm32f407ighx');self.assertTrue(r['chip_known'])
+        self.assertEqual(r['core'],'Cortex-M4');self.assertEqual(r['core_expected'],'Cortex-M4')
+        self.assertEqual(r['expected_device_id'],'0x413')
+        self.assertEqual(r['expected_cpuid'],'0x410fc241')
+        self.assertTrue(r['matches_expected_device'])
+        self.assertFalse([n for n in r['notes'] if 'device id is' in n],r['notes'])
+        # The identity came from the F4's own register, not from the H7 address the profile used
+        # to have to carry.
+        self.assertTrue(any('0xe0042000' in c for c in o.calls),o.calls)
+        self.assertFalse(any('0x5c001000' in c for c in o.calls),o.calls)
+    def test_an_unknown_chip_is_reported_and_the_profile_is_still_used(self):
+        """Silicon the table has never seen must degrade to the profile, not to an error.
+
+        A part added by hand is a legitimate rig; what is not legitimate is silently expecting
+        the default chip's CPUID, which would report a mismatch for a board that is behaving.
+        """
+        o,r=self.run_identify(profile_extra={'chip':'stm32f103c8tx'})
+        self.assertFalse(r['chip_known'])
+        self.assertEqual(r['expected_device_id'],'0x483')
+        self.assertIsNone(r['expected_cpuid'])
+        self.assertTrue(r['matches_expected_device'])
+        self.assertTrue(any('not one this package knows' in n for n in r['notes']),r['notes'])
+    def test_the_clock_systemview_divides_by_is_checked_against_the_target(self):
+        """A wrong cycle_frequency_hz rescales every CPU load, so identify reads the real one.
+
+        The number is not a fact about the profile, it is a fact about the board, and it is the
+        divisor SystemView uses: 550 MHz declared against a 168 MHz target reports a busy
+        percentage 3.3x too small while looking perfectly plausible in the CSV.
+        """
+        with patch.object(d,'symbol_from_elf',return_value='0x20000004'):
+            o,r=self.run_identify(profile_extra={'cycle_frequency_hz':550000000})
+            self.assertEqual(r['system_core_clock']['value_hz'],550000000)
+            self.assertTrue(r['system_core_clock']['matches_profile'])
+            self.assertFalse([n for n in r['notes'] if 'SystemCoreClock' in n],r['notes'])
+            o,r=self.run_identify(profile_extra={'cycle_frequency_hz':168000000},clock=550000000)
+        self.assertEqual(r['system_core_clock']['profile_hz'],168000000)
+        self.assertFalse(r['system_core_clock']['matches_profile'])
+        note=[n for n in r['notes'] if 'SystemCoreClock' in n]
+        self.assertTrue(note,'a clock that disagrees with the target must be reported')
+        self.assertIn('550000000',note[0]);self.assertIn('168000000',note[0])
+        self.assertIn('SystemView',note[0])
     def test_core_halted_by_connection_is_resumed_and_reported(self):
         o,r=self.run_identify(halt_on_connect=True)
         self.assertIn('resume',o.calls)
@@ -614,6 +678,40 @@ class IdentifyTests(unittest.TestCase):
         o,r=self.run_identify(state='halted',resume_if_halted=True)
         self.assertIn('resume',o.calls)
         self.assertEqual(r['state_at_exit'],'running')
+    def test_a_profile_that_states_no_expectation_gets_no_verdict(self):
+        """Silence is reported as silence: a missing expectation is not a failed one.
+
+        ``matches_expected_device`` is what the flash gate reads, so folding "the profile says
+        nothing" into False would either refuse a legitimate flash or, worse, let a reader believe
+        the reported id had been compared against something. It also must not invent the id of the
+        part this package happens to know best -- that is the defect the chip table removed.
+        """
+        o,r=self.run_identify(profile={'_elf':Path('firmware.elf'),'idcode_address':'0x5c001000'})
+        self.assertEqual(r['device_id'],'0x483')
+        self.assertIsNone(r['matches_expected_device'])
+        self.assertIsNone(r['expected_device_id'])
+        self.assertTrue([n for n in r['notes'] if 'without a verdict' in n],r['notes'])
+        self.assertFalse([n for n in r['notes'] if 'refuses to flash' in n],r['notes'])
+    def test_the_reset_cause_is_not_read_from_another_part(self):
+        """--read-reset-cause with nothing to read refuses instead of clearing a foreign register.
+
+        The read is destructive -- it clears the flags it reports -- so guessing an address would
+        both destroy the board's reset history and then report another family's bit names as this
+        board's cause. The chip table makes that address a chip fact, which is why the honest
+        answer here is a refusal rather than the default part's register.
+        """
+        o,r=self.run_identify(profile={'_elf':Path('firmware.elf'),'idcode_address':'0x5c001000'},
+                              read_reset_cause=True)
+        self.assertNotIn('reset_cause',r)
+        self.assertTrue([n for n in r['notes'] if 'is not guessed' in n],r['notes'])
+        self.assertFalse([c for c in o.calls if '0x58024cd0' in c.lower()],o.calls)
+    def test_a_named_chip_supplies_the_reset_cause_register(self):
+        """The same call with a chip named reads the register that part actually has."""
+        o,r=self.run_identify(profile_extra={'chip':'stm32f407ighx'},read_reset_cause=True)
+        self.assertEqual(r['reset_cause']['address'],'0x40023874')
+        self.assertTrue(any('0x40023874' in c.lower() for c in o.calls),o.calls)
+        self.assertFalse(any('0x58024cd0' in c.lower() for c in o.calls),o.calls)
+        self.assertTrue(r['reset_cause']['cleared_by_this_read'])
     def test_unanswered_target_raises_before_any_halt(self):
         o=self.fake(state='unknown')
         profile={'_elf':Path('firmware.elf'),'idcode_address':'0x5c001000','expected_device_id':'0x483',
@@ -702,3 +800,27 @@ class TargetIdentityTests(unittest.TestCase):
         result=d.check_target(backend,self.profile)
         self.assertEqual(backend.commands,['read_memory 0x5c001000 32 1'])
         self.assertEqual(result['device_id'],'0x483')
+    def test_a_profile_without_an_identity_stops_before_flashing(self):
+        """A gate with nothing to compare against must stop, and say which keys it wanted.
+
+        Reached by `flash` right before Flash is written, so the failure mode to avoid is not a
+        confusing message but a KeyError, or worse, a fallback to the part this package knows best.
+        """
+        class GdbBackend:
+            def evaluate(self,expression):raise AssertionError('must not read the target')
+        with self.assertRaises(RuntimeError) as caught:
+            d.check_target(GdbBackend(),{})
+        message=str(caught.exception)
+        self.assertIn('idcode_address',message)
+        self.assertIn('expected_device_id',message)
+        # The message has to say what to write instead, and the known part names are the answer.
+        self.assertIn('stm32f407ighx',message)
+    def test_a_chip_name_is_enough_for_the_flash_gate(self):
+        """The table's answer has to satisfy the gate too, not only `identify`."""
+        class GdbBackend:
+            def __init__(self):self.expressions=[]
+            def evaluate(self,expression):self.expressions.append(expression);return '0x10010413'
+        backend=GdbBackend()
+        result=d.check_target(backend,{'chip':'stm32f407ighx'})
+        self.assertEqual(backend.expressions,['*(unsigned int *)0xe0042000'])
+        self.assertEqual(result['device_id'],'0x413')

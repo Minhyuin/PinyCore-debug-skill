@@ -21,11 +21,22 @@
 
   "_probe_comment": "jlink for a SEGGER probe (SEGGER's driver owns the device, OpenOCD cannot open it); openocd for CMSIS-DAP/ST-Link.",
   "probe": "jlink",
-  "jlink_device": "STM32H723VG",
   "jlink_serial": "PUT-YOUR-PROBE-SERIAL-HERE",
   "jlink_speed_khz": 24000,
   "jlink_gdb_port": 2331,
   "systemview_control_port": 19050,
+
+  "_chip_comment": [
+    "Which silicon this rig drives. This one key is what makes a second board a profile entry",
+    "instead of a code change: the chip table (piny_chips.py, beside this package's scripts)",
+    "supplies the device id, the idcode address, the core and its CPUID, the reset-cause",
+    "register and its bit names, the RAM ranges SystemView scans, the clock SystemView divides",
+    "by, and SEGGER's device name for the part.",
+    "Known chips today: stm32h723vgtx, stm32f407ighx. Run `doctor` to see the full list, or",
+    "read it out of piny_chips.py. A part that is not there yet still works: state the values",
+    "below yourself and the table stays out of the way."
+  ],
+  "chip": "stm32h723vgtx",
 
   "_openocd_comment": "Only read when probe is openocd.",
   "interface_config": "tools/openocd/dap.cfg",
@@ -33,16 +44,17 @@
   "target": "stm32h7x.cpu0",
   "adapter_khz": 500,
 
-  "_target_comment": "Properties of the board, not of the computer. Re-derive them on a new rig instead of copying them: a wrong value here produces plausible-looking numbers that are wrong.",
-  "expected_device_id": "0x483",
-  "idcode_address": "0x5c001000",
-  "cycle_frequency_hz": 550000000,
-  "ram_ranges": [
-    [536870912, 131072],
-    [603979776, 131072],
-    [805306368, 32768],
-    [939524096, 16384]
+  "_target_comment": [
+    "Properties of the board, not of the computer, and normally left out: the chip above fills",
+    "in expected_device_id, expected_cpuid, idcode_address, reset_cause_address,",
+    "reset_cause_flags, cycle_frequency_hz, ram_ranges, jlink_device and core. State any of them",
+    "here to override the table, and doctor will label which values it supplied -- useful when",
+    "the board genuinely differs (an overclocked part, or a value you measured yourself).",
+    "jlink_device is spelled out below rather than left to the chip table because it is the one",
+    "entry a flash depends on directly: SEGGER's name encodes the package and the flash size,",
+    "and the wrong one is not a syntax error, it is a different target."
   ],
+  "jlink_device": "STM32H723VG",
   "rtt_poll_ms": 1,
   "isr_coverage": "partial: FreeRTOS port hooks; application IRQ entry/exit not fully instrumented",
 

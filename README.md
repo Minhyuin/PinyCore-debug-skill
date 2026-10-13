@@ -61,13 +61,28 @@ python -X utf8 scripts\piny_trace.py compare --before artifacts\baseline --after
 
 作为 agent 技能安装时，把整个目录放到技能目录下（例如 `<PinyCore>/.dsh/skills/PinyCore-debug/`），入口是 `SKILL.md`。
 
-## 三条来自实测的硬结论
+## 换一块板子：只写一个 `chip`
+
+同一台机器上接第二块不同型号的板子（例如 STM32H723 之外再加一块 STM32F407），**不需要改代码**：profile 里写一个 `chip` 键，其余型号相关的事实由 `scripts/piny_chips.py` 提供。
+
+```jsonc
+{ "chip": "stm32f407ighx" }   // 型号表补齐 CPUID、DBGMCU 器件号、复位原因寄存器、内存区间、时钟
+```
+
+- 表里现在有 `stm32h723vgtx` 与 `stm32f407ighx` 两条，每条都记录了数值是从哪个项目文件读出来的（`source`）；型号表是"同一型号所有板子都一样"的事实，所以它可以随包分发、也可以被测试固定。
+- **profile 里写了的永远优先**，`doctor` 会逐键标出这个值来自 `chip table` 还是 `profile`。
+- 表里没有的型号**不是错误**：只按 profile 写明的值工作，并且不再假装知道它的 CPUID（以前会把 H723 的期望值套到任何板子上，于是第二块板子被第一块板子的检查拒绝）。
+- 认不出的型号 + 没写 `expected_device_id` 时，`identify` 只报告读到的器件号、不给"匹配/不匹配"的结论；`flash` 的身份闸门在这两种值缺任何一个时**拒绝烧录**，而不是默认放行。
+- 型号相关但只在特定型号上存在的寄存器（`reset_cause_address`）不会被猜：没有型号也没有写地址时，`--read-reset-cause` 会说明"读不了"，因为那个寄存器**读一次就清标志**，猜错等于毁掉复位历史。
+
+## 四条来自实测的硬结论
 
 这个包的规则不是设计出来的，是被板子纠正出来的，所以在这里点名，避免后来者"顺手改回去"：
 
 1. **`DHCSR` 不能用来判断固件是否在跑。** 实板实测：一颗确实在以 ~1009 Hz 跑 RTOS tick 的核，`DHCSR` 返回冻结的 `0x30003`（`C_HALT` 置位），且跨会话读数完全相同。唯一可信的见证是**固件自己的 `xTickCount`**。`DWT->CYCCNT` 在本板同样不可用。
 2. **J-Link 连接后的第一次内存读是 attach 时的调试缓存值。** 同一会话两次读间隔 4 s（中间无运行控制）得到同一个 `213916`，而板子确实在跑；`monitor go` 之后同一地址连续三次读是 `217714/217715/217716`。因此探活顺序必须是 `resume()` → 读 → 睡 → 读。
 3. **采集速率是测量值，不是偏好。** 4000 kHz 时 1 KB RTT 缓冲排不空，丢 2847 个事件，上下文占比之和塌到 65.4 %、Idle 被低估成 48.5 %；12000 kHz 为 1 个溢出、和 100.07 %；24000 kHz 为 0 个溢出、和 99.99 %。质量门是 `context_load_sum` 在 100±1 且 `overflow_events == 0`——**永远不要为了"让这次跑通"而降低速率**。
+4. **SystemView 不会自己去找 RTT 控制块。** 它把上次录制的那块板的地址记在 `%APPDATA%\SEGGER\SEGGER SystemView.ini`（`J-Link\RDG_RTT_MODE=Address` + `J-Link\TXT_RTT_CB_LOCATION`），命令行不给 `-rttcbaddr`/`-rttcbrange` 时**直接读那个记下来的地址**：换到 F407 时它照着 H723 的 `0x20004FC0` 去读一段没有控制块的内存，找不到通道就不发 start，于是 `-save` 写不出文件、退出码 1，而它自己的错误框在 V3.60e 里是坏的（`No such method MainWindow::OnError`），失败完全静默。`record` 因此**每次都显式带上 `-rttcbaddr`**（从 profile 或 ELF 里的 `_SEGGER_RTT` 解析），解析不出才退回 `-rttcbrange auto`。
 
 另外两个坑写在 `SKILL.md` 里：SystemView V3.60e 必须先应答 `No Commercial-Use License` 模态框才会解析命令行（脚本用 `PostMessage(WM_KEYDOWN, VK_RETURN)` 定点投递，桌面锁定时也可用）；headless 导出会把最后一个未闭合上下文写成 `2^63 ns` 哨兵值，产生 `CPU Load outside 0..100` 的 CSV，脚本检测到就拒绝而不是截断。
 
@@ -77,8 +92,9 @@ python -X utf8 scripts\piny_trace.py compare --before artifacts\baseline --after
 
 - 工具按 **profile 值 → PATH → 常见安装目录 → SEGGER/注册表（仅 Windows）** 解析，每个结果都报出是哪一步命中的（`source`）。profile 里已指向真实文件的路径**永远优先**，探测不会悄悄改掉一个能用的配置。
 - 平台差异集中在两个模块里：`piny_linux.py`（Linux 安装目录与 SEGGER 的 Linux 可执行文件名）、`piny_view_win32.py` / `piny_view_x11.py`（许可证模态框的两套后端）。上层 `piny_tools.py` / `piny_view.py` 只做分派，命令与报告结构在两个平台上一致。
+- 换型号（不是换机器）只需要一个 `chip` 键：型号事实住在 `piny_chips.py` 的表里，见上面「换一块板子」。
 - 路径写错时给出的不再是 `FileNotFoundError: [WinError 2]`，而是点名 profile 键、说明该键用途、并指出本机哪里有可用替代。
-- profile 键分成两类：`machine` 键（本机路径，可以抄错也能被重新定位）与 `target` 键（板子/探针属性，**抄到另一套硬件上正是"看起来正常的配置给出错误数字"的来源**）。
+- profile 键分成三类：`machine` 键（本机路径，可以抄错也能被重新定位）、`target` 键（板子/探针属性，**抄到另一套硬件上正是"看起来正常的配置给出错误数字"的来源**）、`chip` 键（**同一型号的所有板子都一样**，所以住在一张可审查、可测试、随包分发的型号表里，profile 只写一个型号名）。
 - `jlink_serial` 缺失时只报告、绝不猜；`freertos_tick_symbol` 可以省略，会从 ELF 自动解析。
 - **诚实的边界**：工具探测的两套搜索逻辑都有单元测试覆盖（`test_tools.py` / `test_linux.py`），X11 后端在 CI 里用 Xvfb 真实加载 `libX11`/`libXtst` 跑通，但**尚未在第二台真实机器上验证过真机安装**，也还没在 Linux 实板上采过一次。到新机器先跑 `doctor --portable` 并核对 `source` 字段。
 
@@ -95,13 +111,15 @@ profiles/
 scripts/
   piny_debug.py           探针侧：doctor / license-check / identify / registers / flash / capture
   piny_trace.py           跟踪侧：analyze / compare / record
+  piny_chips.py           芯片表：每种型号的 CPUID、DBGMCU 器件号、复位原因寄存器、内存区间
   piny_tools.py           工具探测层（分派到平台模块），只用标准库
   piny_linux.py           Linux 安装目录与 SEGGER 的 Linux 可执行文件名
   piny_view.py            模态框应答的分派层：平台无关的轮询/武装/重试循环
   piny_view_win32.py      Win32 后端（ctypes + user32，无第三方依赖）
   piny_view_x11.py        X11 后端（XTest，其次 XSendEvent）
-tests/                    183 个用例，全部在临时目录或打桩下运行，不依赖本机装了什么：
-                          test_debug.py（探针、烧录、liveness）、test_tools.py（可迁移性与探测）、
+tests/                    213 个用例，全部在临时目录或打桩下运行，不依赖本机装了什么：
+                          test_debug.py（探针、烧录、liveness、识别门）、test_chips.py（芯片表
+                          自洽性与解码）、test_tools.py（可迁移性与探测）、
                           test_linux.py（Linux 发现层）、test_trace.py（质量门、导出校验）、
                           test_view.py（模态框应答流程）、test_view_x11.py（X11 后端的几何、
                           按钮识别、降级阶梯与 Xlib 错误处理器）

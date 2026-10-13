@@ -13,7 +13,7 @@ import subprocess
 import threading
 import time
 import uuid
-from piny_debug import ROOT, HIDDEN, __version__, ProbeLock, OpenOCD, GDB, elf_identity, free_port, load_profile, restore_target, stop_process, tcl_word, tool_path
+from piny_debug import ROOT, HIDDEN, __version__, ProbeLock, OpenOCD, GDB, elf_identity, free_port, load_profile, restore_target, stop_process, symbol_from_elf, tcl_word, tool_path
 import piny_view
 
 
@@ -104,6 +104,12 @@ MAIN_WINDOW_SECONDS = 12.0
 #: 21 s live recording became a 3489556 byte .svdat about 21 s after -save. A shorter wait
 #: declared a good recording missing.
 SAVE_WRITE_SECONDS = 45.0
+#: Every requested window comes back longer by the recorder's attach latency: the target
+#: starts recording when the start command reaches it, which happens while the host is
+#: still establishing the RTT channel. Measured on two boards: 5 s -> 10.68 s, 6 s ->
+#: 11.7 s, 10 s -> 16.1 s of trace, i.e. 5.7-6.1 s on top of the request. A span beyond
+#: this allowance - or shorter than the request - is a recording that did not run as asked.
+ATTACH_ALLOWANCE_SECONDS = 7.0
 
 
 def validate_export(contexts_path,events_path):
@@ -294,6 +300,50 @@ def _patch_ini(text):
     return '\n'.join(lines)+'\n'
 
 
+def recorder_command(executable,device,speed_khz,rtt_address=None):
+    """The SystemView command line for a recording, with the control block named.
+
+    One of `-rttcbaddr` and `-rttcbrange auto` is always present. Naming neither is what
+    made the first F407 recording fail: SystemView then uses the recorder configuration it
+    remembers in its own ini (`J-Link\\RDG_RTT_MODE=Address` plus a stale
+    `J-Link\\TXT_RTT_CB_LOCATION`), reads RAM that holds no control block on this part, and
+    exits 1 without ever sending the target its start command.
+    """
+    command=[str(executable),'-recorder','J-Link','-device',str(device),
+             '-if','SWD','-speed',str(speed_khz)]
+    if rtt_address is None:command+=['-rttcbrange','auto']
+    else:command+=['-rttcbaddr','0x%x'%rtt_address]
+    return command
+
+
+def _rtt_address(value):
+    """Normalise an RTT control block address from a profile: int, '0x...', or None."""
+    if value is None:return None
+    if isinstance(value,bool):raise ValueError('Expected an RTT control block address, got %r'%value)
+    if isinstance(value,int):return value
+    text=str(value).strip()
+    if not text:return None
+    try:return int(text,0)
+    except ValueError:raise ValueError('Expected an RTT control block address, got %r'%value)
+
+
+def rtt_control_block(profile):
+    """Where this build's RTT control block is, and how that was established.
+
+    Returns (address_or_None, source). The profile wins when it states `rtt_control_block`;
+    otherwise the address is read out of the ELF from `rtt_control_block_symbol` (default
+    `_SEGGER_RTT`), which is the same symbol SEGGER's own host tools look for. When neither
+    answers, the recorder is told to search instead of being left with a stale address.
+    """
+    stated=profile.get('rtt_control_block')
+    if stated is not None and str(stated).strip()!='':
+        return _rtt_address(stated),'profile'
+    symbol=profile.get('rtt_control_block_symbol') or '_SEGGER_RTT'
+    found=symbol_from_elf(profile,symbol)
+    if found:return _rtt_address(found),'elf:'+str(symbol)
+    return None,'search'
+
+
 def _watch_message_boxes(process_id, stop, seen, interval=0.5):
     """Close SystemView's modal boxes until `stop` is set, recording each one.
 
@@ -316,15 +366,27 @@ def _watch_message_boxes(process_id, stop, seen, interval=0.5):
 
 def systemview_record(executable,out,seconds,device=None,probe=None,
                       auto_accept_license=True,timeout=240.0,speed_khz=4000,
-                      control_port=SYSTEMVIEW_CONTROL_PORT):
+                      control_port=SYSTEMVIEW_CONTROL_PORT,rtt_control_block=None):
     """Record a live SystemView trace from the target through a J-Link probe.
 
     SystemView cannot start a recording from its command line: `-start`, `-stop` and
     `-save` are command line *control* options that only a running instance executes, so
     this launches the recorder with the connection parameters, answers the mandatory
     `No Commercial-Use License` dialog, and then drives the recording over the local
-    control socket. The control block is left to the recorder's own RAM search rather
-    than pinned with -rttcbaddr, so this does not depend on one firmware build's layout.
+    control socket.
+
+    The RTT control block is pinned with `-rttcbaddr` (or searched with `-rttcbrange auto`
+    when the address is unknown). This is not optional politeness: SystemView does NOT
+    search for the control block on its own. It remembers a recorder configuration in its
+    own ini (`[Recorder]` / `J-Link\\RDG_RTT_MODE=Address` /
+    `J-Link\\TXT_RTT_CB_LOCATION=0x...`) and a command line that names neither option
+    leaves that remembered address in force. Measured on this rig: the remembered address
+    was the H723's 0x20004FC0, so the first recording of the F407 board produced no file at
+    all - the recorder read RAM that holds no control block on that part, never opened a
+    channel, never sent the target its start command, and exited 1 with nothing but
+    `QMetaObject::invokeMethod: No such method MainWindow::OnError(int,QString)` on its
+    console, because its error dialog is broken in V3.60e. Naming the address per build
+    removes the dependency on whatever the user last recorded.
 
     The `LoadDataOnStart` setting is turned off for the run: with it on, SystemView loads
     its most recent recording at startup, and a failed capture then leaves files that are
@@ -341,8 +403,16 @@ def systemview_record(executable,out,seconds,device=None,probe=None,
     recording=(out/'live.svdat').resolve()
     for stale in (recording,out/'contexts.csv',out/'events.csv'):
         if stale.exists():stale.unlink()
-    command=[str(executable),'-recorder','J-Link','-device',device or 'STM32H723VG',
-             '-if','SWD','-speed',str(speed_khz)]
+    # The recorder is told which device to attach to, so the name has to come from the rig. It
+    # used to fall back to one board's part number, which is worse than an error: SystemView
+    # accepts the name, attaches to the probe, and produces a recording of whatever is really
+    # there -- or of nothing -- while the metadata says the board it was told to expect.
+    if not device:
+        raise ValueError('no target device name for the recorder: pass device= or set "jlink_device" '
+                         '(or "chip") in the profile. It is deliberately not defaulted, because the '
+                         'wrong name attaches to the probe and still produces a file.')
+    rtt_address=_rtt_address(rtt_control_block)
+    command=recorder_command(executable,device,speed_khz,rtt_address)
     log_path=out/'systemview-record.log'
     with log_path.open('w',encoding='utf-8') as log:
         log.write('command='+json.dumps(command)+'\nprobe='+str(probe or 'jlink')+'\n')
@@ -428,8 +498,10 @@ def systemview_record(executable,out,seconds,device=None,probe=None,
         raise RuntimeError('SystemView produced no recording at %s after %.0fs; see %s'
                            %(recording,seconds,log_path))
     return recording,{'bytes':recording.stat().st_size,'seconds':seconds,
-                      'probe':probe or 'jlink','device':device or 'STM32H723VG',
+                      'probe':probe or 'jlink','device':str(device),
                       'speed_khz':speed_khz,'license':license_report,'steps':steps,
+                      'rtt_control_block':('0x%x'%rtt_address) if rtt_address is not None else None,
+                      'rtt_control_block_pinned':rtt_address is not None,
                       'ini_restored':restored,'command':command,'log':str(log_path),
                       'console_log':str(console),
                       'message_boxes':[s for s in steps if s.get('step')=='message-boxes']}
@@ -447,22 +519,27 @@ def record(p,out,seconds,auto_accept_license=True,timeout=240.0,device=None,
     # Resolved once through the profile, so a copied profile with a stale SystemView path is
     # reported by name instead of failing inside a subprocess with an OS error.
     systemview=tool_path(p,'systemview')
+    # The recorder has to be told where this build's control block is: without it SystemView
+    # uses the address it remembers from the last board, which is a property of the user's
+    # GUI session rather than of the target in front of us.
+    rtt,rtt_source=rtt_control_block(p)
     recording,meta=systemview_record(systemview,out,seconds,
                                      device=device or p.get('jlink_device'),
                                      auto_accept_license=auto_accept_license,
                                      timeout=timeout,
                                      speed_khz=speed_khz or p.get('jlink_speed_khz') or 4000,
                                      control_port=control_port or p.get('systemview_control_port')
-                                     or SYSTEMVIEW_CONTROL_PORT)
+                                     or SYSTEMVIEW_CONTROL_PORT,
+                                     rtt_control_block=rtt)
+    meta['rtt_control_block_source']=rtt_source
     summary=analyze(systemview,recording,out,auto_accept_license,timeout=90,recover_existing=True)
     summary['recording_meta']=meta
     summary['data_origin']='live_target_capture'
     issues=summary['quality']['issues']
-    # The recorded span always covers the request plus whatever was still sitting in the
-    # target's RTT buffer when -start arrived: measured 11.7-11.8 s of trace for a 6 s
-    # request, and 16.1 s for a 10 s request. Only a span shorter than the request or more
-    # than twice it indicates a recording that really did not run as asked.
-    if not seconds<=summary['recorded_seconds']<=seconds*2:
+    # The recorded span covers the request plus the recorder's attach latency, so the window
+    # is a floor rather than the whole span; the allowance is measured, not guessed, and a
+    # span outside it (or shorter than the request) is a recording that did not run as asked.
+    if not seconds<=summary['recorded_seconds']<=seconds+ATTACH_ALLOWANCE_SECONDS:
         issues.append('recorded_duration_differs_from_requested_window')
     summary['quality']['usable']=not issues
     summary['quality']['allow_overflow']=bool(allow_overflow)
